@@ -4,4 +4,4 @@ pandas
 numpy
 plotly
 streamlit-searchbox
-
+streamlit-autorefresh
