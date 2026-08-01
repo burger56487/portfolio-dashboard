@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from streamlit_searchbox import st_searchbox
+from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="Portfolio Tracker", layout="wide")
 st.title("📈 Portfolio Tracker")
@@ -12,7 +13,7 @@ st.caption("Multi-market (US / HK / A-share) portfolio tracking with live market
 # ==================================================================
 # LIVE MARKET HEADER
 # ==================================================================
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=30)
 def index_snapshot(symbol):
     # 支持 "主symbol|备用symbol"
     for s in symbol.split("|"):
@@ -26,7 +27,7 @@ def index_snapshot(symbol):
     return None
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=30)
 def intraday(symbol):
     for s in symbol.split("|"):
         d = yf.Ticker(s).history(period="1d", interval="1m")
@@ -39,6 +40,13 @@ def intraday(symbol):
 
 INDICES = {"S&P 500": "^GSPC", "Nasdaq": "^IXIC", "Hang Seng": "^HSI", "CSI 300": "000300.SS|ASHR"}
 
+# --- Auto-refresh control ---
+auto = st.checkbox("🔄 Auto-refresh market data", value=False)
+if auto:
+    secs = st.select_slider("Refresh interval (seconds)",
+                            options=[30, 60, 120, 300], value=60)
+    st_autorefresh(interval=secs * 1000, key="mkt_refresh")
+    st.caption(f"Auto-refreshing every {secs}s. Note: free data is ~15-min delayed, so numbers update at most every few minutes.")
 
 
 st.subheader("🌐 Live Market")
