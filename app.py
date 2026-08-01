@@ -4,18 +4,16 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from streamlit_searchbox import st_searchbox
-from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="Portfolio Tracker", layout="wide")
 st.title("📈 Portfolio Tracker")
-st.caption("Multi-market (US / HK / A-share) portfolio tracking with live market data, P&L, dividends, FX conversion, and risk analytics.")
+st.caption("Multi-market portfolio tracking with time-weighted returns (TWR), FX conversion, and risk analytics.")
 
 # ==================================================================
 # LIVE MARKET HEADER
 # ==================================================================
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=60)
 def index_snapshot(symbol):
-    # 支持 "主symbol|备用symbol"
     for s in symbol.split("|"):
         try:
             d = yf.Ticker(s).history(period="5d")
@@ -26,8 +24,7 @@ def index_snapshot(symbol):
             continue
     return None
 
-
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=60)
 def intraday(symbol):
     for s in symbol.split("|"):
         d = yf.Ticker(s).history(period="1d", interval="1m")
@@ -37,42 +34,26 @@ def intraday(symbol):
             return d
     return pd.DataFrame()
 
-
 INDICES = {"S&P 500": "^GSPC", "Nasdaq": "^IXIC", "Hang Seng": "^HSI", "CSI 300": "000300.SS|ASHR"}
-
-# --- Auto-refresh control ---
-auto = st.checkbox("🔄 Auto-refresh market data", value=False)
-if auto:
-    secs = st.select_slider("Refresh interval (seconds)",
-                            options=[30, 60, 120, 300], value=60)
-    st_autorefresh(interval=secs * 1000, key="mkt_refresh")
-    st.caption(f"Auto-refreshing every {secs}s. Note: free data is ~15-min delayed, so numbers update at most every few minutes.")
-
 
 st.subheader("🌐 Live Market")
 mcols = st.columns(len(INDICES))
 for (nm, sym), col in zip(INDICES.items(), mcols):
     snap = index_snapshot(sym)
-    if snap:
-        last, pct = snap
-        col.metric(nm, f"{last:,.0f}", f"{pct:+.2f}%")
-    else:
-        col.metric(nm, "—")
+    col.metric(nm, f"{snap[0]:,.0f}" if snap else "—", f"{snap[1]:+.2f}%" if snap else None)
 
 idx_choice = st.selectbox("Intraday chart", list(INDICES.keys()), index=0)
 intra = intraday(INDICES[idx_choice])
 if not intra.empty:
     ifig = go.Figure()
-    ifig.add_trace(go.Scatter(x=intra.index, y=intra["Close"], name=idx_choice,
-                              line=dict(color="#2E86DE")))
-    ifig.update_layout(height=280, yaxis_title="Level", hovermode="x unified",
-                       margin=dict(t=10, b=10))
+    ifig.add_trace(go.Scatter(x=intra.index, y=intra["Close"], name=idx_choice, line=dict(color="#2E86DE")))
+    ifig.update_layout(height=280, yaxis_title="Level", hovermode="x unified", margin=dict(t=10, b=10))
     st.plotly_chart(ifig, use_container_width=True)
-st.caption("Data via Yahoo Finance (~15-min delayed). Markets closed on weekends — intraday shows the last session.")
+st.caption("Data via Yahoo Finance (~15-min delayed). Weekends show the last session.")
 st.divider()
 
 # ==================================================================
-# Stock database (from stocks.csv, with fallback)
+# Stock database
 # ==================================================================
 @st.cache_data
 def load_stock_db():
@@ -89,21 +70,17 @@ def load_stock_db():
 STOCK_DB = load_stock_db()
 
 def currency_of(sym):
-    if sym.endswith(".HK"): return "HKD"
+    if sym in ("^HSI",):                          return "HKD"
+    if sym.endswith(".HK"):                        return "HKD"
     if sym.endswith(".SS") or sym.endswith(".SZ"): return "CNY"
     return "USD"
 
 def search_stocks(query):
-    """Prefix-first search on each keystroke."""
     if not query:
         return []
-    qu = query.strip().upper()
-    qraw = query.strip()
-    results = []
+    qu = query.strip().upper(); qraw = query.strip(); results = []
     for _, row in STOCK_DB.iterrows():
-        sym = str(row["Symbol"]).upper()
-        en = str(row["Name_EN"]).upper()
-        cn = str(row["Name_CN"])
+        sym = str(row["Symbol"]).upper(); en = str(row["Name_EN"]).upper(); cn = str(row["Name_CN"])
         score = None
         if sym.startswith(qu):        score = 0
         elif en.startswith(qu):       score = 1
@@ -116,7 +93,6 @@ def search_stocks(query):
 
 @st.cache_data(ttl=600)
 def price_on_date(ticker, date_str):
-    """Local-currency close on/near a given date."""
     try:
         d0 = pd.to_datetime(date_str)
         h = yf.Ticker(ticker).history(start=d0 - pd.Timedelta(days=7), end=d0 + pd.Timedelta(days=1))
@@ -140,7 +116,6 @@ if "txns" not in st.session_state:
         "Price":  [125.0, 330.0, 1700.0],
     })
 
-# Import
 st.sidebar.subheader("Import / Export")
 up = st.sidebar.file_uploader("Upload transactions CSV", type="csv")
 if up is not None:
@@ -150,14 +125,9 @@ if up is not None:
     except Exception as e:
         st.sidebar.error(f"Could not read CSV: {e}")
 
-# Add a transaction (prefix autocomplete + auto price)
 st.sidebar.subheader("Add a transaction")
 with st.sidebar:
-    picked = st_searchbox(
-        search_stocks,
-        placeholder="Type ticker or name (T, 腾讯, Tencent)…",
-        key="stock_search",
-    )
+    picked = st_searchbox(search_stocks, placeholder="Type ticker or name (T, 腾讯, Tencent)…", key="stock_search")
 manual = st.sidebar.text_input("…or enter any ticker manually (e.g. 0857.HK)").strip().upper()
 t_ticker = manual if manual else (picked or "")
 
@@ -167,14 +137,16 @@ t_shares = st.sidebar.number_input("Shares", min_value=0.0, value=1.0, step=1.0)
 
 auto_price = price_on_date(t_ticker, str(t_date)) if t_ticker else None
 _default = float(auto_price) if auto_price else 100.0
-t_price = st.sidebar.number_input("Price (local currency)", min_value=0.0,
-    value=_default, step=1.0, key=f"price_{t_ticker}_{t_date}")
+t_price = st.sidebar.number_input("Price (local currency)", min_value=0.0, value=_default, step=1.0,
+                                  key=f"price_{t_ticker}_{t_date}")
 if auto_price:
     st.sidebar.caption(f"📈 Auto-filled: close on/near {t_date} = {auto_price:.2f} (editable)")
 
 if st.sidebar.button("➕ Add transaction"):
     if not t_ticker:
         st.sidebar.error("Choose or enter a ticker.")
+    elif t_shares <= 0 or t_price <= 0:
+        st.sidebar.error("Shares and price must be positive.")
     else:
         in_db = t_ticker in STOCK_DB["Symbol"].values
         ok = True
@@ -191,76 +163,77 @@ if st.sidebar.button("➕ Add transaction"):
             st.session_state.txns = pd.concat([st.session_state.txns, new], ignore_index=True)
             st.sidebar.success(f"Added {t_action} {t_shares} {t_ticker}")
 
-# Manage transactions (safe delete)
 st.sidebar.subheader("Manage transactions")
-df = st.session_state.txns.reset_index(drop=True)
-if not df.empty:
-    options = [
-        f"{i}: {r.get('Date','')}  {r.get('Action','')}  {r.get('Shares','')} {r.get('Ticker','')} @ {r.get('Price','')}"
-        for i, r in df.iterrows()
-    ]
+df_side = st.session_state.txns.reset_index(drop=True)
+if not df_side.empty:
+    options = [f"{i}: {r.get('Date','')}  {r.get('Action','')}  {r.get('Shares','')} {r.get('Ticker','')} @ {r.get('Price','')}"
+               for i, r in df_side.iterrows()]
     to_delete = st.sidebar.multiselect("Select transactions to delete", options)
     if st.sidebar.button("🗑️ Delete selected") and to_delete:
         idx = [int(o.split(":")[0]) for o in to_delete]
-        st.session_state.txns = df.drop(index=idx).reset_index(drop=True)
+        st.session_state.txns = df_side.drop(index=idx).reset_index(drop=True)
         st.rerun()
 else:
-    st.sidebar.caption("No transactions yet — add one above.")
+    st.sidebar.caption("No transactions yet.")
 
-if st.sidebar.button("⚠️ Clear all"):
+confirm_clear = st.sidebar.checkbox("Confirm clear all")
+if st.sidebar.button("⚠️ Clear all") and confirm_clear:
     st.session_state.txns = st.session_state.txns.iloc[0:0]
     st.rerun()
 
 with st.sidebar.expander("Advanced: edit raw table"):
-    st.session_state.txns = st.data_editor(
-        st.session_state.txns, num_rows="dynamic",
-        use_container_width=True, key="raw_editor")
+    st.session_state.txns = st.data_editor(st.session_state.txns, num_rows="dynamic",
+                                           use_container_width=True, key="raw_editor")
 
 txns = st.session_state.txns.copy()
-
 st.sidebar.download_button("💾 Download transactions CSV",
     txns.to_csv(index=False).encode(), "transactions.csv", "text/csv")
 
 st.sidebar.subheader("Settings")
 benchmark = st.sidebar.selectbox("Benchmark", ["SPY", "QQQ", "^HSI", "000300.SS"], index=0)
 rf_rate = st.sidebar.number_input("Risk-free rate (%/yr)", 0.0, value=4.0, step=0.5) / 100
-st.sidebar.caption("All values converted to USD. Prices are dividend-adjusted.")
+st.sidebar.caption("Returns are time-weighted (TWR); all values in USD.")
 
 # ==================================================================
-# Clean transactions
+# Clean & validate transactions
 # ==================================================================
 if txns.empty or txns["Ticker"].dropna().empty:
-    st.warning("Add at least one transaction.")
-    st.stop()
-txns = txns.dropna(subset=["Ticker","Action","Shares","Price"])
-txns["Ticker"] = txns["Ticker"].astype(str).str.upper()
+    st.warning("Add at least one transaction."); st.stop()
+
+txns["Ticker"] = txns["Ticker"].astype(str).str.upper().str.strip()
+txns["Action"] = txns["Action"].astype(str).str.upper().str.strip()
 txns["Date"] = pd.to_datetime(txns["Date"], errors="coerce")
-txns = txns.dropna(subset=["Date"]).sort_values("Date")
+txns["Shares"] = pd.to_numeric(txns["Shares"], errors="coerce")
+txns["Price"] = pd.to_numeric(txns["Price"], errors="coerce")
+
+bad = txns[~txns["Action"].isin(["BUY","SELL"]) | txns["Date"].isna()
+           | (txns["Shares"] <= 0) | (txns["Price"] <= 0) | txns["Shares"].isna() | txns["Price"].isna()]
+if not bad.empty:
+    st.warning(f"{len(bad)} invalid transaction row(s) ignored (need Action BUY/SELL, valid date, positive shares & price).")
+txns = txns[txns["Action"].isin(["BUY","SELL"]) & txns["Date"].notna()
+            & (txns["Shares"] > 0) & (txns["Price"] > 0)].sort_values("Date")
+if txns.empty:
+    st.error("No valid transactions."); st.stop()
+
 tickers = sorted(txns["Ticker"].unique().tolist())
 start_date = txns["Date"].min()
 
 # ==================================================================
-# FX (once)
+# FX + prices (auto_adjust=True: total-return, split-adjusted series)
 # ==================================================================
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=1800)
 def get_fx(start):
     fx = {"USD": None}
-    try:
-        fx["HKD"] = yf.download("HKDUSD=X", start=start, auto_adjust=True)["Close"].squeeze()
-    except Exception:
-        fx["HKD"] = None
-    try:
-        fx["CNY"] = yf.download("CNYUSD=X", start=start, auto_adjust=True)["Close"].squeeze()
-    except Exception:
-        fx["CNY"] = None
+    for cur, pair in [("HKD","HKDUSD=X"), ("CNY","CNYUSD=X")]:
+        try:
+            fx[cur] = yf.download(pair, start=start, auto_adjust=True)["Close"].squeeze()
+        except Exception:
+            fx[cur] = None
     return fx
 
 fx_cache = get_fx(start_date)
 
-# ==================================================================
-# Prices (USD-converted)
-# ==================================================================
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=1800)
 def load_prices(tickers, bench, start, _fx):
     syms = tickers + [bench]
     data = yf.download(syms, start=start, auto_adjust=True)["Close"]
@@ -275,8 +248,7 @@ def load_prices(tickers, bench, start, _fx):
 try:
     prices = load_prices(tickers, benchmark, start_date, fx_cache)
 except Exception as e:
-    st.error(f"Could not download data: {e}")
-    st.stop()
+    st.error(f"Could not download data: {e}"); st.stop()
 
 valid = [t for t in tickers if t in prices.columns and prices[t].notna().any()]
 dropped = set(tickers) - set(valid)
@@ -284,90 +256,98 @@ if dropped:
     st.warning(f"No data for: {', '.join(dropped)} (ignored).")
 tickers = valid
 if not tickers:
-    st.error("No valid tickers.")
-    st.stop()
+    st.error("No valid tickers."); st.stop()
 
-# ==================================================================
-# Local price -> USD at trade date
-# ==================================================================
 price_index = prices.index
 def to_usd(sym, price, date):
-    cur = currency_of(sym)
-    s = fx_cache.get(cur)
-    if s is None:
-        return price
+    cur = currency_of(sym); s = fx_cache.get(cur)
+    if s is None: return price
     r = s.reindex(price_index).ffill()
     try:
-        rate = r.asof(date)
-        return price * (rate if pd.notna(rate) else r.iloc[-1])
+        rate = r.asof(date); return price * (rate if pd.notna(rate) else r.iloc[-1])
     except Exception:
         return price
 
 # ==================================================================
-# Holdings + realised P&L (average cost, USD)
+# Holdings, realised P&L (avg cost), with oversell warning
 # ==================================================================
 shares_ot = pd.DataFrame(0.0, index=price_index, columns=tickers)
 pos = {t: {"shares":0.0, "avg_cost":0.0} for t in tickers}
-realized = 0.0
+realized = 0.0; oversell = []
 
 for _, row in txns.iterrows():
     t = row["Ticker"]
-    if t not in tickers:
-        continue
+    if t not in tickers: continue
     d, act, sh = row["Date"], row["Action"], float(row["Shares"])
     pr = to_usd(t, float(row["Price"]), d)
-    sign = 1 if act == "BUY" else -1
-    shares_ot.loc[shares_ot.index >= d, t] += sign * sh
     p = pos[t]
     if act == "BUY":
+        shares_ot.loc[shares_ot.index >= d, t] += sh
         tot = p["shares"] + sh
-        if tot > 0:
-            p["avg_cost"] = (p["shares"]*p["avg_cost"] + sh*pr) / tot
+        if tot > 0: p["avg_cost"] = (p["shares"]*p["avg_cost"] + sh*pr) / tot
         p["shares"] = tot
-    else:
-        realized += (pr - p["avg_cost"]) * min(sh, p["shares"])
-        p["shares"] = max(p["shares"] - sh, 0.0)
+    else:  # SELL
+        if sh > p["shares"] + 1e-9:
+            oversell.append(f"{d.date()} SELL {sh:g} {t} exceeds holding {p['shares']:g}")
+        sell = min(sh, p["shares"])
+        shares_ot.loc[shares_ot.index >= d, t] -= sell
+        realized += (pr - p["avg_cost"]) * sell
+        p["shares"] = max(p["shares"] - sell, 0.0)
+
+if oversell:
+    st.warning("Oversell detected (capped at held quantity): " + "; ".join(oversell))
 
 shares_ot = shares_ot.clip(lower=0)
 port_prices = prices[tickers].ffill()
-port_value = (shares_ot * port_prices).sum(axis=1)
-port_value = port_value[port_value > 0]
-if port_value.empty:
-    st.warning("No active holdings.")
-    st.stop()
-port_ret = port_value.pct_change().dropna()
+port_value = (shares_ot * port_prices).sum(axis=1)     # dollar value (incl. cash flows)
 
-cur_shares = pd.Series({t: pos[t]["shares"] for t in tickers})
-cur_shares = cur_shares[cur_shares > 0]
+# ---- Time-Weighted Return: isolate market return from cash flows ----
+prev_shares = shares_ot.shift(1).fillna(0.0)
+val_prev = (prev_shares * port_prices.shift(1)).sum(axis=1)
+val_hold = (prev_shares * port_prices).sum(axis=1)
+twr = (val_hold / val_prev - 1).replace([np.inf, -np.inf], np.nan)
+port_ret = twr[val_prev > 0].dropna()
+if port_ret.empty:
+    st.warning("Not enough data to compute returns."); st.stop()
+
+twr_curve = (1 + port_ret).cumprod()
+twr_curve = twr_curve / twr_curve.iloc[0] * 100        # index = 100 at start
+port_total = twr_curve.iloc[-1]/100 - 1
+
+# current holdings
+cur_shares = pd.Series({t: pos[t]["shares"] for t in tickers}); cur_shares = cur_shares[cur_shares > 0]
 cur_prices = port_prices.iloc[-1]
 latest_value = cur_shares * cur_prices[cur_shares.index]
 market_value = latest_value.sum()
 cost_basis = pd.Series({t: pos[t]["avg_cost"]*pos[t]["shares"] for t in cur_shares.index}).sum()
 unrealized = market_value - cost_basis
 
-bench_px = prices[benchmark].reindex(port_value.index).ffill()
-bench_total = bench_px.iloc[-1]/bench_px.iloc[0] - 1
-port_total = port_value.iloc[-1]/port_value.iloc[0] - 1
+# benchmark (USD, TWR-comparable)
+bench_px = prices[benchmark].reindex(port_ret.index).ffill()
+bench_curve = bench_px / bench_px.iloc[0] * 100
+bench_total = bench_curve.iloc[-1]/100 - 1
 bench_ret = bench_px.pct_change().dropna()
 
 # ==================================================================
-# Risk metrics
+# Risk metrics (on TWR)
 # ==================================================================
-def sharpe(r, rf):
-    v = r.std()*np.sqrt(252)
-    return (r.mean()*252 - rf)/v if v > 0 else 0.0
-def sortino(r, rf):
-    dn = r[r<0].std()*np.sqrt(252)
-    return (r.mean()*252 - rf)/dn if dn > 0 else 0.0
-
 ann_vol = port_ret.std()*np.sqrt(252)
-port_sharpe = sharpe(port_ret, rf_rate)
-port_sortino = sortino(port_ret, rf_rate)
-var95 = np.percentile(port_ret, 5)*100 if len(port_ret) else 0.0
-port_mdd = (port_value/port_value.cummax()-1).min()
+excess_ann = port_ret.mean()*252 - rf_rate
+port_sharpe = excess_ann/ann_vol if ann_vol > 0 else 0.0
+
+rf_daily = rf_rate/252
+downside = port_ret[port_ret < rf_daily] - rf_daily
+dd_dev = np.sqrt((downside**2).mean())*np.sqrt(252) if len(downside) else 0.0
+port_sortino = excess_ann/dd_dev if dd_dev > 0 else 0.0
+
+q = np.percentile(port_ret, 5) if len(port_ret) else 0.0
+var95 = -q*100                                              # positive loss
+cvar95 = -port_ret[port_ret <= q].mean()*100 if (port_ret <= q).any() else 0.0
+port_mdd = (twr_curve/twr_curve.cummax()-1).min()
+
 common = port_ret.index.intersection(bench_ret.index)
 beta = (np.cov(port_ret.loc[common], bench_ret.loc[common])[0,1]/np.var(bench_ret.loc[common])
-        if len(common)>2 and np.var(bench_ret.loc[common])>0 else float("nan"))
+        if len(common) > 2 and np.var(bench_ret.loc[common]) > 0 else float("nan"))
 
 # ==================================================================
 # Portfolio summary
@@ -375,34 +355,41 @@ beta = (np.cov(port_ret.loc[common], bench_ret.loc[common])[0,1]/np.var(bench_re
 st.subheader("💼 My Portfolio")
 c1,c2,c3,c4 = st.columns(4)
 c1.metric("Market Value (USD)", f"${market_value:,.0f}")
-c2.metric("Unrealised P&L", f"${unrealized:,.0f}", f"{(unrealized/cost_basis*100) if cost_basis>0 else 0:+.1f}%")
-c3.metric("Realised P&L", f"${realized:,.0f}")
-c4.metric(f"vs {benchmark}", f"{(port_total-bench_total)*100:+.1f} pp")
+c2.metric("TWR Total Return", f"{port_total*100:+.1f}%")
+c3.metric("Unrealised P&L", f"${unrealized:,.0f}", f"{(unrealized/cost_basis*100) if cost_basis>0 else 0:+.1f}%")
+c4.metric("Realised P&L", f"${realized:,.0f}")
 
 r1,r2,r3,r4,r5 = st.columns(5)
 r1.metric("Sharpe", f"{port_sharpe:.2f}")
 r2.metric("Sortino", f"{port_sortino:.2f}")
 r3.metric("Volatility", f"{ann_vol*100:.1f}%")
 r4.metric("Max Drawdown", f"{port_mdd*100:.1f}%")
-r5.metric("Daily VaR 95%", f"{var95:.2f}%")
+r5.metric("Beta", f"{beta:.2f}")
+
+r6,r7,r8 = st.columns(3)
+r6.metric("Daily VaR 95% (loss)", f"{var95:.2f}%")
+r7.metric("Daily CVaR 95% (loss)", f"{cvar95:.2f}%")
+r8.metric(f"vs {benchmark}", f"{(port_total-bench_total)*100:+.1f} pp")
+
+st.caption(f"Prices as of {price_index[-1].date()} | {len(port_ret)} return observations | "
+           f"Returns time-weighted. Note: P&L uses dividend/split-adjusted prices, so it may differ from a broker statement that separates price gains and dividends.")
 
 st.divider()
 tab1,tab2,tab3,tab4,tab5,tab6 = st.tabs(
     ["📊 Performance","🥧 Allocation","🔗 Risk","📅 Annual","📋 Holdings","🧾 Transactions"])
 
 with tab1:
-    st.subheader(f"Portfolio Value vs {benchmark} (USD)")
-    bs = port_value.iloc[0]*(bench_px/bench_px.iloc[0])
+    st.subheader(f"Growth of 100 — Portfolio (TWR) vs {benchmark}")
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=port_value.index, y=port_value.values, name="Portfolio"))
-    fig.add_trace(go.Scatter(x=bs.index, y=bs.values, name=benchmark, line=dict(dash="dash")))
-    fig.update_layout(height=400, yaxis_title="Value ($)", hovermode="x unified")
+    fig.add_trace(go.Scatter(x=twr_curve.index, y=twr_curve.values, name="Portfolio (TWR)"))
+    fig.add_trace(go.Scatter(x=bench_curve.index, y=bench_curve.values, name=benchmark, line=dict(dash="dash")))
+    fig.update_layout(height=400, yaxis_title="Index (start = 100)", hovermode="x unified")
     st.plotly_chart(fig, use_container_width=True)
     col1,col2 = st.columns(2)
     with col1:
         st.subheader("Drawdown")
-        dd = (port_value/port_value.cummax()-1)*100
-        dfig = go.Figure(); dfig.add_trace(go.Scatter(x=dd.index,y=dd.values,fill="tozeroy",line=dict(color="#d9534f")))
+        dd = (twr_curve/twr_curve.cummax()-1)*100
+        dfig=go.Figure(); dfig.add_trace(go.Scatter(x=dd.index,y=dd.values,fill="tozeroy",line=dict(color="#d9534f")))
         dfig.update_layout(height=320, yaxis_title="Drawdown (%)"); st.plotly_chart(dfig, use_container_width=True)
     with col2:
         st.subheader("Rolling 6M Sharpe")
@@ -438,9 +425,9 @@ with tab3:
         st.info("Need ≥2 current holdings.")
 
 with tab4:
-    st.subheader(f"Annual Returns vs {benchmark}")
-    def yearly(v): return pd.Series({yr:g.iloc[-1]/g.iloc[0]-1 for yr,g in v.groupby(v.index.year)})
-    py=yearly(port_value)*100; sy=yearly(bench_px)*100
+    st.subheader(f"Annual Returns (TWR) vs {benchmark}")
+    py = port_ret.groupby(port_ret.index.year).apply(lambda r: (1+r).prod()-1)*100
+    sy = bench_ret.groupby(bench_ret.index.year).apply(lambda r: (1+r).prod()-1)*100
     yrs=[str(y) for y in py.index]
     af=go.Figure(); af.add_trace(go.Bar(x=yrs,y=py.values,name="Portfolio"))
     af.add_trace(go.Bar(x=yrs,y=sy.reindex(py.index).values,name=benchmark))
@@ -460,7 +447,7 @@ with tab5:
             "Unrealised P&L": pd.Series({t:(cur_prices[t]-pos[t]["avg_cost"])*pos[t]["shares"] for t in cur_shares.index}).round(2),
             "Weight %": (latest_value/latest_value.sum()*100).round(1),
         }), use_container_width=True)
-    st.caption(f"Realised P&L: ${realized:,.2f} | All in USD, dividend-adjusted.")
+    st.caption(f"Realised P&L: ${realized:,.2f}")
 
 with tab6:
     st.subheader("Transaction History")
