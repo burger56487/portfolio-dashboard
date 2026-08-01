@@ -14,20 +14,32 @@ st.caption("Multi-market (US / HK / A-share) portfolio tracking with live market
 # ==================================================================
 @st.cache_data(ttl=60)
 def index_snapshot(symbol):
-    d = yf.Ticker(symbol).history(period="5d")
-    if d.empty or len(d) < 2:
-        return None
-    last = float(d["Close"].iloc[-1]); prev = float(d["Close"].iloc[-2])
-    return last, (last / prev - 1) * 100
+    # 支持 "主symbol|备用symbol"
+    for s in symbol.split("|"):
+        try:
+            d = yf.Ticker(s).history(period="5d")
+            if not d.empty and len(d) >= 2:
+                last = float(d["Close"].iloc[-1]); prev = float(d["Close"].iloc[-2])
+                return last, (last / prev - 1) * 100
+        except Exception:
+            continue
+    return None
+
 
 @st.cache_data(ttl=60)
 def intraday(symbol):
-    d = yf.Ticker(symbol).history(period="1d", interval="1m")
-    if d.empty:
-        d = yf.Ticker(symbol).history(period="5d", interval="15m")
-    return d
+    for s in symbol.split("|"):
+        d = yf.Ticker(s).history(period="1d", interval="1m")
+        if d.empty:
+            d = yf.Ticker(s).history(period="5d", interval="15m")
+        if not d.empty:
+            return d
+    return pd.DataFrame()
 
-INDICES = {"S&P 500": "^GSPC", "Nasdaq": "^IXIC", "Hang Seng": "^HSI", "CSI 300": "000300.SS"}
+
+INDICES = {"S&P 500": "^GSPC", "Nasdaq": "^IXIC", "Hang Seng": "^HSI", "CSI 300": "000300.SS|ASHR"}
+
+
 
 st.subheader("🌐 Live Market")
 mcols = st.columns(len(INDICES))
