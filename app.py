@@ -263,7 +263,11 @@ def get_fx(start):
 fx_cache = get_fx(start_date)
 _fx_msg = [f"1 {c} = {float(fx_cache[c].iloc[-1]):.4f} USD" for c in ["HKD","CNY"]
            if fx_cache.get(c) is not None and hasattr(fx_cache[c],"empty") and not fx_cache[c].empty]
-st.sidebar.success("💱 " + " | ".join(_fx_msg)) if _fx_msg else st.sidebar.warning("💱 FX unavailable")
+if _fx_msg:
+    st.sidebar.success("💱 " + " | ".join(_fx_msg))
+else:
+    st.sidebar.warning("💱 FX unavailable")
+
 
 @st.cache_data(ttl=1800)
 def load_prices(tickers, bench, start, _fx):
