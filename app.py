@@ -3,6 +3,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+from streamlit_searchbox import st_searchbox
 
 st.set_page_config(page_title="Portfolio Tracker", layout="wide")
 st.title("📈 Portfolio Tracker")
@@ -30,6 +31,27 @@ def currency_of(sym):
     if sym.endswith(".SS") or sym.endswith(".SZ"): return "CNY"
     return "USD"
 
+def search_stocks(query):
+    """Called on each keystroke; returns (label, symbol) sorted prefix-first."""
+    if not query:
+        return []
+    qu = query.strip().upper()
+    qraw = query.strip()
+    results = []
+    for _, row in STOCK_DB.iterrows():
+        sym = str(row["Symbol"]).upper()
+        en = str(row["Name_EN"]).upper()
+        cn = str(row["Name_CN"])
+        score = None
+        if sym.startswith(qu):        score = 0
+        elif en.startswith(qu):       score = 1
+        elif qraw and qraw in cn:     score = 1
+        elif qu in sym or qu in en:   score = 2
+        if score is not None:
+            results.append((score, str(row["label"]), str(row["Symbol"])))
+    results.sort(key=lambda x: (x[0], x[1]))
+    return [(lbl, sym) for _, lbl, sym in results]
+
 # ==================================================================
 # Sidebar: transactions
 # ==================================================================
@@ -54,16 +76,16 @@ if up is not None:
     except Exception as e:
         st.sidebar.error(f"Could not read CSV: {e}")
 
-# Add a transaction (searchable)
+# Add a transaction (prefix autocomplete)
 st.sidebar.subheader("Add a transaction")
-choice = st.sidebar.selectbox(
-    "Search stock (type name / ticker, e.g. T, 腾讯, Tencent)",
-    options=["— manual entry —"] + STOCK_DB["label"].tolist(),
-)
-if choice == "— manual entry —":
-    t_ticker = st.sidebar.text_input("Enter any ticker (e.g. 0857.HK)").strip().upper()
-else:
-    t_ticker = STOCK_DB.loc[STOCK_DB["label"] == choice, "Symbol"].iloc[0]
+with st.sidebar:
+    picked = st_searchbox(
+        search_stocks,
+        placeholder="Type ticker or name (T, 腾讯, Tencent)…",
+        key="stock_search",
+    )
+manual = st.sidebar.text_input("…or enter any ticker manually (e.g. 0857.HK)").strip().upper()
+t_ticker = manual if manual else (picked or "")
 
 t_date = st.sidebar.date_input("Date", pd.to_datetime("2024-01-02"))
 t_action = st.sidebar.selectbox("Action", ["BUY", "SELL"])
@@ -76,7 +98,7 @@ if st.sidebar.button("➕ Add transaction"):
     else:
         in_db = t_ticker in STOCK_DB["Symbol"].values
         ok = True
-        if not in_db:                       # only validate manual entries
+        if not in_db:
             try:
                 ok = not yf.Ticker(t_ticker).history(period="5d").empty
             except Exception:
@@ -164,7 +186,7 @@ if not tickers:
     st.stop()
 
 # ==================================================================
-# Convert a local-currency transaction price to USD at trade date
+# Convert local-currency transaction price to USD at trade date
 # ==================================================================
 price_index = prices.index
 def to_usd(sym, price, date):
