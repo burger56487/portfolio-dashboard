@@ -7,7 +7,7 @@ from streamlit_searchbox import st_searchbox
 
 st.set_page_config(page_title="Portfolio Tracker", layout="wide")
 st.title("📈 Portfolio Tracker")
-st.caption("Multi-market portfolio tracking with time-weighted returns (TWR), FX conversion, and risk analytics.")
+st.caption("Multi-market portfolio tracking with TWR, fees/taxes, multi-account, FX conversion, and risk analytics.")
 
 # ==================================================================
 # LIVE MARKET HEADER
@@ -70,14 +70,18 @@ def load_stock_db():
 STOCK_DB = load_stock_db()
 
 def currency_of(sym):
-    if sym in ("^HSI",):                          return "HKD"
-    if sym.endswith(".HK"):                        return "HKD"
-    if sym.endswith(".SS") or sym.endswith(".SZ"): return "CNY"
+    if sym in ("^HSI",):                            return "HKD"
+    if sym.endswith(".HK"):                          return "HKD"
+    if sym.endswith(".SS") or sym.endswith(".SZ"):   return "CNY"
     return "USD"
 
+def market_of(s):
+    if s.endswith(".HK"): return "Hong Kong"
+    if s.endswith(".SS") or s.endswith(".SZ"): return "China A"
+    return "US"
+
 def search_stocks(query):
-    if not query:
-        return []
+    if not query: return []
     qu = query.strip().upper(); qraw = query.strip(); results = []
     for _, row in STOCK_DB.iterrows():
         sym = str(row["Symbol"]).upper(); en = str(row["Name_EN"]).upper(); cn = str(row["Name_CN"])
@@ -102,6 +106,14 @@ def price_on_date(ticker, date_str):
     except Exception:
         return None
 
+TXN_COLS = ["Date","Ticker","Action","Shares","Price","Fee","Tax","Account","Note"]
+
+def normalize_txns(df):
+    for c, default in [("Fee",0.0),("Tax",0.0),("Account","Default"),("Note","")]:
+        if c not in df.columns:
+            df[c] = default
+    return df[TXN_COLS]
+
 # ==================================================================
 # Sidebar: transactions
 # ==================================================================
@@ -114,33 +126,44 @@ if "txns" not in st.session_state:
         "Action": ["BUY", "BUY", "BUY"],
         "Shares": [10.0, 100.0, 10.0],
         "Price":  [125.0, 330.0, 1700.0],
+        "Fee":    [1.0, 5.0, 3.0],
+        "Tax":    [0.0, 0.0, 0.0],
+        "Account":["Default","Default","Default"],
+        "Note":   ["","",""],
     })
+st.session_state.txns = normalize_txns(st.session_state.txns)
 
+# Import
 st.sidebar.subheader("Import / Export")
 up = st.sidebar.file_uploader("Upload transactions CSV", type="csv")
 if up is not None:
     try:
-        st.session_state.txns = pd.read_csv(up)[["Date","Ticker","Action","Shares","Price"]]
+        st.session_state.txns = normalize_txns(pd.read_csv(up))
         st.sidebar.success("Imported!")
     except Exception as e:
         st.sidebar.error(f"Could not read CSV: {e}")
 
+# Add
 st.sidebar.subheader("Add a transaction")
 with st.sidebar:
     picked = st_searchbox(search_stocks, placeholder="Type ticker or name (T, 腾讯, Tencent)…", key="stock_search")
-manual = st.sidebar.text_input("…or enter any ticker manually (e.g. 0857.HK)").strip().upper()
+manual = st.sidebar.text_input("…or enter any ticker manually").strip().upper()
 t_ticker = manual if manual else (picked or "")
 
 t_date = st.sidebar.date_input("Date", pd.to_datetime("2024-01-02"))
 t_action = st.sidebar.selectbox("Action", ["BUY", "SELL"])
 t_shares = st.sidebar.number_input("Shares", min_value=0.0, value=1.0, step=1.0)
-
 auto_price = price_on_date(t_ticker, str(t_date)) if t_ticker else None
 _default = float(auto_price) if auto_price else 100.0
 t_price = st.sidebar.number_input("Price (local currency)", min_value=0.0, value=_default, step=1.0,
                                   key=f"price_{t_ticker}_{t_date}")
 if auto_price:
-    st.sidebar.caption(f"📈 Auto-filled: close on/near {t_date} = {auto_price:.2f} (editable)")
+    st.sidebar.caption(f"📈 Auto-filled: {auto_price:.2f} (editable)")
+colf1, colf2 = st.sidebar.columns(2)
+t_fee = colf1.number_input("Fee", min_value=0.0, value=0.0, step=1.0)
+t_tax = colf2.number_input("Tax", min_value=0.0, value=0.0, step=1.0)
+t_account = st.sidebar.text_input("Account", value="Default").strip() or "Default"
+t_note = st.sidebar.text_input("Note", value="")
 
 if st.sidebar.button("➕ Add transaction"):
     if not t_ticker:
@@ -151,24 +174,24 @@ if st.sidebar.button("➕ Add transaction"):
         in_db = t_ticker in STOCK_DB["Symbol"].values
         ok = True
         if not in_db:
-            try:
-                ok = not yf.Ticker(t_ticker).history(period="5d").empty
-            except Exception:
-                ok = False
+            try: ok = not yf.Ticker(t_ticker).history(period="5d").empty
+            except Exception: ok = False
         if not ok:
             st.sidebar.error(f"'{t_ticker}' not found.")
         else:
-            new = pd.DataFrame({"Date":[str(t_date)],"Ticker":[t_ticker],
-                                "Action":[t_action],"Shares":[t_shares],"Price":[t_price]})
+            new = pd.DataFrame([{"Date":str(t_date),"Ticker":t_ticker,"Action":t_action,
+                                 "Shares":t_shares,"Price":t_price,"Fee":t_fee,"Tax":t_tax,
+                                 "Account":t_account,"Note":t_note}])
             st.session_state.txns = pd.concat([st.session_state.txns, new], ignore_index=True)
             st.sidebar.success(f"Added {t_action} {t_shares} {t_ticker}")
 
+# Manage
 st.sidebar.subheader("Manage transactions")
 df_side = st.session_state.txns.reset_index(drop=True)
 if not df_side.empty:
-    options = [f"{i}: {r.get('Date','')}  {r.get('Action','')}  {r.get('Shares','')} {r.get('Ticker','')} @ {r.get('Price','')}"
+    options = [f"{i}: {r.get('Date','')}  {r.get('Action','')}  {r.get('Shares','')} {r.get('Ticker','')} @ {r.get('Price','')} [{r.get('Account','')}]"
                for i, r in df_side.iterrows()]
-    to_delete = st.sidebar.multiselect("Select transactions to delete", options)
+    to_delete = st.sidebar.multiselect("Select to delete", options)
     if st.sidebar.button("🗑️ Delete selected") and to_delete:
         idx = [int(o.split(":")[0]) for o in to_delete]
         st.session_state.txns = df_side.drop(index=idx).reset_index(drop=True)
@@ -182,20 +205,23 @@ if st.sidebar.button("⚠️ Clear all") and confirm_clear:
     st.rerun()
 
 with st.sidebar.expander("Advanced: edit raw table"):
-    st.session_state.txns = st.data_editor(st.session_state.txns, num_rows="dynamic",
-                                           use_container_width=True, key="raw_editor")
+    st.session_state.txns = normalize_txns(st.data_editor(
+        st.session_state.txns, num_rows="dynamic", use_container_width=True, key="raw_editor"))
 
 txns = st.session_state.txns.copy()
 st.sidebar.download_button("💾 Download transactions CSV",
     txns.to_csv(index=False).encode(), "transactions.csv", "text/csv")
 
+# Settings
 st.sidebar.subheader("Settings")
 benchmark = st.sidebar.selectbox("Benchmark", ["SPY", "QQQ", "^HSI", "000300.SS"], index=0)
 rf_rate = st.sidebar.number_input("Risk-free rate (%/yr)", 0.0, value=4.0, step=0.5) / 100
+acct_list = sorted([a for a in txns.get("Account", pd.Series()).dropna().unique().tolist()])
+sel_acct = st.sidebar.selectbox("Account view", ["All"] + acct_list)
 st.sidebar.caption("Returns are time-weighted (TWR); all values in USD.")
 
 # ==================================================================
-# Clean & validate transactions
+# Clean & validate
 # ==================================================================
 if txns.empty or txns["Ticker"].dropna().empty:
     st.warning("Add at least one transaction."); st.stop()
@@ -203,54 +229,47 @@ if txns.empty or txns["Ticker"].dropna().empty:
 txns["Ticker"] = txns["Ticker"].astype(str).str.upper().str.strip()
 txns["Action"] = txns["Action"].astype(str).str.upper().str.strip()
 txns["Date"] = pd.to_datetime(txns["Date"], errors="coerce")
-txns["Shares"] = pd.to_numeric(txns["Shares"], errors="coerce")
-txns["Price"] = pd.to_numeric(txns["Price"], errors="coerce")
+for c in ["Shares","Price","Fee","Tax"]:
+    txns[c] = pd.to_numeric(txns[c], errors="coerce")
+txns["Fee"] = txns["Fee"].fillna(0.0); txns["Tax"] = txns["Tax"].fillna(0.0)
+txns["Account"] = txns["Account"].fillna("Default")
 
 bad = txns[~txns["Action"].isin(["BUY","SELL"]) | txns["Date"].isna()
            | (txns["Shares"] <= 0) | (txns["Price"] <= 0) | txns["Shares"].isna() | txns["Price"].isna()]
 if not bad.empty:
-    st.warning(f"{len(bad)} invalid transaction row(s) ignored (need Action BUY/SELL, valid date, positive shares & price).")
+    st.warning(f"{len(bad)} invalid row(s) ignored (need BUY/SELL, valid date, positive shares & price).")
 txns = txns[txns["Action"].isin(["BUY","SELL"]) & txns["Date"].notna()
             & (txns["Shares"] > 0) & (txns["Price"] > 0)].sort_values("Date")
+
+if sel_acct != "All":
+    txns = txns[txns["Account"] == sel_acct]
 if txns.empty:
-    st.error("No valid transactions."); st.stop()
+    st.error("No valid transactions for this view."); st.stop()
 
 tickers = sorted(txns["Ticker"].unique().tolist())
 start_date = txns["Date"].min()
 
 # ==================================================================
-# FX + prices (auto_adjust=True: total-return, split-adjusted series)
+# FX + prices
 # ==================================================================
 @st.cache_data(ttl=1800)
 def get_fx(start):
     fx = {"USD": None}
     for cur, pair in [("HKD","HKDUSD=X"), ("CNY","CNYUSD=X")]:
-        try:
-            fx[cur] = yf.download(pair, start=start, auto_adjust=True)["Close"].squeeze()
-        except Exception:
-            fx[cur] = None
+        try: fx[cur] = yf.download(pair, start=start, auto_adjust=True)["Close"].squeeze()
+        except Exception: fx[cur] = None
     return fx
 
 fx_cache = get_fx(start_date)
-
-# --- show FX rates so conversion is visible/verifiable ---
-_fx_msg = []
-for _cur in ["HKD", "CNY"]:
-    _s = fx_cache.get(_cur)
-    if _s is not None and hasattr(_s, "empty") and not _s.empty:
-        _fx_msg.append(f"1 {_cur} = {float(_s.iloc[-1]):.4f} USD")
-if _fx_msg:
-    st.sidebar.success("💱 FX loaded: " + " | ".join(_fx_msg))
-else:
-    st.sidebar.warning("💱 FX rates unavailable — HK/A-share values may NOT be converted.")
-
+_fx_msg = [f"1 {c} = {float(fx_cache[c].iloc[-1]):.4f} USD" for c in ["HKD","CNY"]
+           if fx_cache.get(c) is not None and hasattr(fx_cache[c],"empty") and not fx_cache[c].empty]
+st.sidebar.success("💱 " + " | ".join(_fx_msg)) if _fx_msg else st.sidebar.warning("💱 FX unavailable")
 
 @st.cache_data(ttl=1800)
 def load_prices(tickers, bench, start, _fx):
     syms = tickers + [bench]
     data = yf.download(syms, start=start, auto_adjust=True)["Close"]
-    if isinstance(data, pd.Series):
-        data = data.to_frame()
+    if isinstance(data, pd.Series): data = data.to_frame()
     for col in data.columns:
         cur = currency_of(col)
         if _fx.get(cur) is not None:
@@ -264,56 +283,58 @@ except Exception as e:
 
 valid = [t for t in tickers if t in prices.columns and prices[t].notna().any()]
 dropped = set(tickers) - set(valid)
-if dropped:
-    st.warning(f"No data for: {', '.join(dropped)} (ignored).")
+if dropped: st.warning(f"No data for: {', '.join(dropped)} (ignored).")
 tickers = valid
-if not tickers:
-    st.error("No valid tickers."); st.stop()
+if not tickers: st.error("No valid tickers."); st.stop()
 
 price_index = prices.index
-def to_usd(sym, price, date):
+def to_usd(sym, amount, date):
     cur = currency_of(sym); s = fx_cache.get(cur)
-    if s is None: return price
+    if s is None: return amount
     r = s.reindex(price_index).ffill()
     try:
-        rate = r.asof(date); return price * (rate if pd.notna(rate) else r.iloc[-1])
+        rate = r.asof(date); return amount * (rate if pd.notna(rate) else r.iloc[-1])
     except Exception:
-        return price
+        return amount
 
 # ==================================================================
-# Holdings, realised P&L (avg cost), with oversell warning
+# Holdings, realised P&L (avg cost incl. fees/taxes), oversell warn
 # ==================================================================
 shares_ot = pd.DataFrame(0.0, index=price_index, columns=tickers)
 pos = {t: {"shares":0.0, "avg_cost":0.0} for t in tickers}
-realized = 0.0; oversell = []
+realized = 0.0; total_fees = 0.0; oversell = []
 
 for _, row in txns.iterrows():
     t = row["Ticker"]
     if t not in tickers: continue
     d, act, sh = row["Date"], row["Action"], float(row["Shares"])
-    pr = to_usd(t, float(row["Price"]), d)
+    pr  = to_usd(t, float(row["Price"]), d)
+    fee = to_usd(t, float(row["Fee"]), d) + to_usd(t, float(row["Tax"]), d)
+    total_fees += fee
     p = pos[t]
     if act == "BUY":
         shares_ot.loc[shares_ot.index >= d, t] += sh
+        cost = sh*pr + fee
         tot = p["shares"] + sh
-        if tot > 0: p["avg_cost"] = (p["shares"]*p["avg_cost"] + sh*pr) / tot
+        if tot > 0: p["avg_cost"] = (p["shares"]*p["avg_cost"] + cost) / tot
         p["shares"] = tot
     else:  # SELL
         if sh > p["shares"] + 1e-9:
-            oversell.append(f"{d.date()} SELL {sh:g} {t} exceeds holding {p['shares']:g}")
+            oversell.append(f"{d.date()} SELL {sh:g} {t} > held {p['shares']:g}")
         sell = min(sh, p["shares"])
         shares_ot.loc[shares_ot.index >= d, t] -= sell
-        realized += (pr - p["avg_cost"]) * sell
+        proceeds = sell*pr - fee
+        realized += proceeds - sell*p["avg_cost"]
         p["shares"] = max(p["shares"] - sell, 0.0)
 
 if oversell:
-    st.warning("Oversell detected (capped at held quantity): " + "; ".join(oversell))
+    st.warning("Oversell (capped at held): " + "; ".join(oversell))
 
 shares_ot = shares_ot.clip(lower=0)
 port_prices = prices[tickers].ffill()
-port_value = (shares_ot * port_prices).sum(axis=1)     # dollar value (incl. cash flows)
+port_value = (shares_ot * port_prices).sum(axis=1)
 
-# ---- Time-Weighted Return: isolate market return from cash flows ----
+# TWR
 prev_shares = shares_ot.shift(1).fillna(0.0)
 val_prev = (prev_shares * port_prices.shift(1)).sum(axis=1)
 val_hold = (prev_shares * port_prices).sum(axis=1)
@@ -321,12 +342,9 @@ twr = (val_hold / val_prev - 1).replace([np.inf, -np.inf], np.nan)
 port_ret = twr[val_prev > 0].dropna()
 if port_ret.empty:
     st.warning("Not enough data to compute returns."); st.stop()
-
-twr_curve = (1 + port_ret).cumprod()
-twr_curve = twr_curve / twr_curve.iloc[0] * 100        # index = 100 at start
+twr_curve = (1 + port_ret).cumprod(); twr_curve = twr_curve / twr_curve.iloc[0] * 100
 port_total = twr_curve.iloc[-1]/100 - 1
 
-# current holdings
 cur_shares = pd.Series({t: pos[t]["shares"] for t in tickers}); cur_shares = cur_shares[cur_shares > 0]
 cur_prices = port_prices.iloc[-1]
 latest_value = cur_shares * cur_prices[cur_shares.index]
@@ -334,37 +352,31 @@ market_value = latest_value.sum()
 cost_basis = pd.Series({t: pos[t]["avg_cost"]*pos[t]["shares"] for t in cur_shares.index}).sum()
 unrealized = market_value - cost_basis
 
-# benchmark (USD, TWR-comparable)
 bench_px = prices[benchmark].reindex(port_ret.index).ffill()
 bench_curve = bench_px / bench_px.iloc[0] * 100
 bench_total = bench_curve.iloc[-1]/100 - 1
 bench_ret = bench_px.pct_change().dropna()
 
-# ==================================================================
-# Risk metrics (on TWR)
-# ==================================================================
+# Risk metrics
 ann_vol = port_ret.std()*np.sqrt(252)
 excess_ann = port_ret.mean()*252 - rf_rate
 port_sharpe = excess_ann/ann_vol if ann_vol > 0 else 0.0
-
 rf_daily = rf_rate/252
 downside = port_ret[port_ret < rf_daily] - rf_daily
 dd_dev = np.sqrt((downside**2).mean())*np.sqrt(252) if len(downside) else 0.0
 port_sortino = excess_ann/dd_dev if dd_dev > 0 else 0.0
-
 q = np.percentile(port_ret, 5) if len(port_ret) else 0.0
-var95 = -q*100                                              # positive loss
+var95 = -q*100
 cvar95 = -port_ret[port_ret <= q].mean()*100 if (port_ret <= q).any() else 0.0
 port_mdd = (twr_curve/twr_curve.cummax()-1).min()
-
 common = port_ret.index.intersection(bench_ret.index)
 beta = (np.cov(port_ret.loc[common], bench_ret.loc[common])[0,1]/np.var(bench_ret.loc[common])
         if len(common) > 2 and np.var(bench_ret.loc[common]) > 0 else float("nan"))
 
 # ==================================================================
-# Portfolio summary
+# Summary
 # ==================================================================
-st.subheader("💼 My Portfolio")
+st.subheader(f"💼 My Portfolio  ·  {sel_acct}")
 c1,c2,c3,c4 = st.columns(4)
 c1.metric("Market Value (USD)", f"${market_value:,.0f}")
 c2.metric("TWR Total Return", f"{port_total*100:+.1f}%")
@@ -381,15 +393,15 @@ r5.metric("Beta", f"{beta:.2f}")
 r6,r7,r8 = st.columns(3)
 r6.metric("Daily VaR 95% (loss)", f"{var95:.2f}%")
 r7.metric("Daily CVaR 95% (loss)", f"{cvar95:.2f}%")
-r8.metric(f"vs {benchmark}", f"{(port_total-bench_total)*100:+.1f} pp")
+r8.metric("Total Fees & Taxes", f"${total_fees:,.0f}")
 
-st.caption(f"Prices as of {price_index[-1].date()} | {len(port_ret)} return observations | "
-           f"Returns time-weighted. Note: P&L uses dividend/split-adjusted prices, so it may differ from a broker statement that separates price gains and dividends.")
+st.caption(f"Prices as of {price_index[-1].date()} | {len(port_ret)} obs | "
+           f"Cost basis includes fees/taxes. Returns time-weighted. "
+           f"P&L uses dividend/split-adjusted prices (dividends/splits as explicit transactions coming next).")
 
 st.divider()
 tab1,tab2,tab3,tab4,tab5,tab6,tab7 = st.tabs(
     ["📊 Performance","🥧 Allocation","🔗 Risk","📅 Annual","📋 Holdings","🧾 Transactions","🌍 Exposure"])
-
 
 with tab1:
     st.subheader(f"Growth of 100 — Portfolio (TWR) vs {benchmark}")
@@ -411,8 +423,7 @@ with tab1:
         rfig.update_layout(height=320, yaxis_title="Sharpe"); st.plotly_chart(rfig, use_container_width=True)
 
 with tab2:
-    if len(cur_shares)==0:
-        st.info("No current holdings.")
+    if len(cur_shares)==0: st.info("No current holdings.")
     else:
         a,b = st.columns(2)
         with a:
@@ -434,8 +445,7 @@ with tab3:
             colorscale="RdBu",reversescale=True,text=corr.round(2).values,texttemplate="%{text}"))
         hm.update_layout(height=500); st.plotly_chart(hm, use_container_width=True)
         st.metric("Avg Pairwise Correlation", f"{corr.values[np.triu_indices_from(corr.values,k=1)].mean():.2f}")
-    else:
-        st.info("Need ≥2 current holdings.")
+    else: st.info("Need ≥2 current holdings.")
 
 with tab4:
     st.subheader(f"Annual Returns (TWR) vs {benchmark}")
@@ -449,18 +459,17 @@ with tab4:
 
 with tab5:
     st.subheader("Current Holdings (USD)")
-    if len(cur_shares)==0:
-        st.info("No holdings.")
+    if len(cur_shares)==0: st.info("No holdings.")
     else:
         st.dataframe(pd.DataFrame({
             "Shares": cur_shares,
-            "Avg Cost": pd.Series({t:pos[t]["avg_cost"] for t in cur_shares.index}).round(2),
+            "Avg Cost (incl. fees)": pd.Series({t:pos[t]["avg_cost"] for t in cur_shares.index}).round(2),
             "Current Price": cur_prices[cur_shares.index].round(2),
             "Market Value": latest_value.round(2),
             "Unrealised P&L": pd.Series({t:(cur_prices[t]-pos[t]["avg_cost"])*pos[t]["shares"] for t in cur_shares.index}).round(2),
             "Weight %": (latest_value/latest_value.sum()*100).round(1),
         }), use_container_width=True)
-    st.caption(f"Realised P&L: ${realized:,.2f}")
+    st.caption(f"Realised P&L: ${realized:,.2f} | Total fees & taxes: ${total_fees:,.2f}")
 
 with tab6:
     st.subheader("Transaction History")
@@ -468,50 +477,38 @@ with tab6:
 
 with tab7:
     st.subheader("Exposure & Concentration")
-
-    def market_of(s):
-        if s.endswith(".HK"): return "Hong Kong"
-        if s.endswith(".SS") or s.endswith(".SZ"): return "China A"
-        return "US"
-
     if len(cur_shares) == 0:
         st.info("No current holdings.")
     else:
         w = latest_value / latest_value.sum()
-        hhi = float((w**2).sum())
-        eff_n = 1/hhi if hhi > 0 else 0
+        hhi = float((w**2).sum()); eff_n = 1/hhi if hhi > 0 else 0
         cc1, cc2, cc3 = st.columns(3)
         cc1.metric("Holdings", f"{len(w)}")
         cc2.metric("Top Holding Weight", f"{w.max()*100:.1f}%")
         cc3.metric("Effective # (1/HHI)", f"{eff_n:.1f}")
-        st.caption("HHI = sum of squared weights; Effective # = 1/HHI. Lower concentration = more diversified.")
-
-        mkt = (w.groupby([market_of(t) for t in w.index]).sum() * 100)
-        cur = (w.groupby([currency_of(t) for t in w.index]).sum() * 100)
+        st.caption("Effective # = 1/HHI. Lower concentration = more diversified.")
+        mkt = (w.groupby([market_of(t) for t in w.index]).sum()*100)
+        cur = (w.groupby([currency_of(t) for t in w.index]).sum()*100)
         e1, e2 = st.columns(2)
         with e1:
             st.write("**By Market**")
-            pm = go.Figure(data=[go.Pie(labels=mkt.index, values=mkt.values, hole=0.4)])
-            pm.update_layout(height=340, margin=dict(t=10,b=10)); st.plotly_chart(pm, use_container_width=True)
+            pm=go.Figure(data=[go.Pie(labels=mkt.index,values=mkt.values,hole=0.4)]); pm.update_layout(height=340,margin=dict(t=10,b=10)); st.plotly_chart(pm, use_container_width=True)
         with e2:
             st.write("**By Currency**")
-            pc = go.Figure(data=[go.Pie(labels=cur.index, values=cur.values, hole=0.4)])
-            pc.update_layout(height=340, margin=dict(t=10,b=10)); st.plotly_chart(pc, use_container_width=True)
+            pc=go.Figure(data=[go.Pie(labels=cur.index,values=cur.values,hole=0.4)]); pc.update_layout(height=340,margin=dict(t=10,b=10)); st.plotly_chart(pc, use_container_width=True)
 
     st.subheader(f"Rolling Beta (126d) vs {benchmark}")
     aligned = pd.DataFrame({"p": port_ret, "b": bench_ret}).dropna()
     if len(aligned) > 130:
         rb = (aligned["p"].rolling(126).cov(aligned["b"]) / aligned["b"].rolling(126).var()).dropna()
-        rbfig = go.Figure(); rbfig.add_trace(go.Scatter(x=rb.index, y=rb.values, name="Rolling Beta"))
+        rbfig=go.Figure(); rbfig.add_trace(go.Scatter(x=rb.index,y=rb.values,name="Rolling Beta"))
         rbfig.add_hline(y=1, line_color="gray", line_dash="dash")
-        rbfig.update_layout(height=300, yaxis_title="Beta", hovermode="x unified")
-        st.plotly_chart(rbfig, use_container_width=True)
+        rbfig.update_layout(height=300, yaxis_title="Beta"); st.plotly_chart(rbfig, use_container_width=True)
     else:
         st.info("Need more history for rolling beta.")
 
     st.subheader("Drawdown Duration")
-    peak = twr_curve.cummax()
-    underwater = (twr_curve < peak).astype(int)
+    peak = twr_curve.cummax(); underwater = (twr_curve < peak).astype(int)
     runs = (underwater != underwater.shift()).cumsum()
     dd_lengths = underwater.groupby(runs).sum()
     longest = int(dd_lengths.max()) if len(dd_lengths) else 0
@@ -519,5 +516,3 @@ with tab7:
     dc1, dc2 = st.columns(2)
     dc1.metric("Longest Drawdown (days)", f"{longest}")
     dc2.metric("Current Drawdown (days)", f"{current}")
-    st.caption("Trading days spent below the previous peak.")
-
