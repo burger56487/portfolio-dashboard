@@ -233,6 +233,18 @@ def get_fx(start):
 
 fx_cache = get_fx(start_date)
 
+# --- show FX rates so conversion is visible/verifiable ---
+_fx_msg = []
+for _cur in ["HKD", "CNY"]:
+    _s = fx_cache.get(_cur)
+    if _s is not None and hasattr(_s, "empty") and not _s.empty:
+        _fx_msg.append(f"1 {_cur} = {float(_s.iloc[-1]):.4f} USD")
+if _fx_msg:
+    st.sidebar.success("💱 FX loaded: " + " | ".join(_fx_msg))
+else:
+    st.sidebar.warning("💱 FX rates unavailable — HK/A-share values may NOT be converted.")
+
+
 @st.cache_data(ttl=1800)
 def load_prices(tickers, bench, start, _fx):
     syms = tickers + [bench]
