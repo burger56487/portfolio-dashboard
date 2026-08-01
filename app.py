@@ -9,24 +9,21 @@ st.title("📈 Portfolio Tracker")
 st.caption("Multi-market (US / HK / A-share) portfolio tracking with P&L, dividends, FX conversion, and risk analytics.")
 
 # ==================================================================
-# Built-in stock database (extend freely). Symbol / EN / CN / Market
+# Stock database (from stocks.csv, with fallback)
 # ==================================================================
-STOCK_DB = pd.DataFrame([
-    ("AAPL","Apple","苹果","US"), ("MSFT","Microsoft","微软","US"),
-    ("NVDA","Nvidia","英伟达","US"), ("AMZN","Amazon","亚马逊","US"),
-    ("GOOGL","Alphabet","谷歌","US"), ("META","Meta","脸书","US"),
-    ("TSLA","Tesla","特斯拉","US"), ("NFLX","Netflix","奈飞","US"),
-    ("JPM","JPMorgan","摩根大通","US"), ("V","Visa","维萨","US"),
-    ("0700.HK","Tencent","腾讯","HK"), ("9988.HK","Alibaba","阿里巴巴","HK"),
-    ("3690.HK","Meituan","美团","HK"), ("0941.HK","China Mobile","中国移动","HK"),
-    ("1299.HK","AIA","友邦保险","HK"), ("0388.HK","HKEX","香港交易所","HK"),
-    ("1810.HK","Xiaomi","小米","HK"), ("2318.HK","Ping An","中国平安","HK"),
-    ("600519.SS","Kweichow Moutai","贵州茅台","CN"), ("601398.SS","ICBC","工商银行","CN"),
-    ("600036.SS","China Merchants Bank","招商银行","CN"), ("601318.SS","Ping An","中国平安","CN"),
-    ("000001.SZ","Ping An Bank","平安银行","CN"), ("000858.SZ","Wuliangye","五粮液","CN"),
-    ("300750.SZ","CATL","宁德时代","CN"), ("002594.SZ","BYD","比亚迪","CN"),
-], columns=["Symbol","Name_EN","Name_CN","Market"])
-STOCK_DB["label"] = STOCK_DB["Name_CN"] + " " + STOCK_DB["Name_EN"] + " (" + STOCK_DB["Symbol"] + ")"
+@st.cache_data
+def load_stock_db():
+    try:
+        db = pd.read_csv("stocks.csv")
+    except Exception:
+        db = pd.DataFrame([
+            ("AAPL","Apple","苹果","US"), ("0700.HK","Tencent","腾讯","HK"),
+            ("600519.SS","Kweichow Moutai","贵州茅台","CN"),
+        ], columns=["Symbol","Name_EN","Name_CN","Market"])
+    db["label"] = db["Name_CN"].astype(str) + " " + db["Name_EN"].astype(str) + " (" + db["Symbol"].astype(str) + ")"
+    return db
+
+STOCK_DB = load_stock_db()
 
 def currency_of(sym):
     if sym.endswith(".HK"): return "HKD"
@@ -77,16 +74,20 @@ if st.sidebar.button("➕ Add transaction"):
     if not t_ticker:
         st.sidebar.error("Choose or enter a ticker.")
     else:
-        try:
-            if yf.Ticker(t_ticker).history(period="5d").empty:
-                st.sidebar.error(f"'{t_ticker}' not found.")
-            else:
-                new = pd.DataFrame({"Date":[str(t_date)],"Ticker":[t_ticker],
-                                    "Action":[t_action],"Shares":[t_shares],"Price":[t_price]})
-                st.session_state.txns = pd.concat([st.session_state.txns, new], ignore_index=True)
-                st.sidebar.success(f"Added {t_action} {t_shares} {t_ticker}")
-        except Exception as e:
-            st.sidebar.error(f"Error: {e}")
+        in_db = t_ticker in STOCK_DB["Symbol"].values
+        ok = True
+        if not in_db:                       # only validate manual entries
+            try:
+                ok = not yf.Ticker(t_ticker).history(period="5d").empty
+            except Exception:
+                ok = False
+        if not ok:
+            st.sidebar.error(f"'{t_ticker}' not found.")
+        else:
+            new = pd.DataFrame({"Date":[str(t_date)],"Ticker":[t_ticker],
+                                "Action":[t_action],"Shares":[t_shares],"Price":[t_price]})
+            st.session_state.txns = pd.concat([st.session_state.txns, new], ignore_index=True)
+            st.sidebar.success(f"Added {t_action} {t_shares} {t_ticker}")
 
 st.sidebar.write("Edit transactions:")
 st.session_state.txns = st.sidebar.data_editor(
@@ -115,30 +116,40 @@ tickers = sorted(txns["Ticker"].unique().tolist())
 start_date = txns["Date"].min()
 
 # ==================================================================
-# Data + FX conversion to USD
+# FX (downloaded once, reused everywhere)
 # ==================================================================
 @st.cache_data(ttl=3600)
-def load_prices(tickers, bench, start):
+def get_fx(start):
+    fx = {"USD": None}
+    try:
+        fx["HKD"] = yf.download("HKDUSD=X", start=start, auto_adjust=True)["Close"].squeeze()
+    except Exception:
+        fx["HKD"] = None
+    try:
+        fx["CNY"] = yf.download("CNYUSD=X", start=start, auto_adjust=True)["Close"].squeeze()
+    except Exception:
+        fx["CNY"] = None
+    return fx
+
+fx_cache = get_fx(start_date)
+
+# ==================================================================
+# Prices (converted to USD using fx_cache)
+# ==================================================================
+@st.cache_data(ttl=3600)
+def load_prices(tickers, bench, start, _fx):
     syms = tickers + [bench]
     data = yf.download(syms, start=start, auto_adjust=True)["Close"]
     if isinstance(data, pd.Series):
         data = data.to_frame()
-    # FX rates -> USD
-    fx = {}
-    if any(s.endswith(".HK") for s in syms):
-        h = yf.download("HKDUSD=X", start=start, auto_adjust=True)["Close"]
-        fx["HKD"] = h.squeeze()
-    if any(s.endswith(".SS") or s.endswith(".SZ") for s in syms):
-        c = yf.download("CNYUSD=X", start=start, auto_adjust=True)["Close"]
-        fx["CNY"] = c.squeeze()
     for col in data.columns:
         cur = currency_of(col)
-        if cur in fx:
-            data[col] = data[col] * fx[cur].reindex(data.index).ffill()
+        if _fx.get(cur) is not None:
+            data[col] = data[col] * _fx[cur].reindex(data.index).ffill()
     return data.dropna(how="all")
 
 try:
-    prices = load_prices(tickers, benchmark, start_date)
+    prices = load_prices(tickers, benchmark, start_date, fx_cache)
 except Exception as e:
     st.error(f"Could not download data: {e}")
     st.stop()
@@ -153,23 +164,61 @@ if not tickers:
     st.stop()
 
 # ==================================================================
-# Reconstruct holdings + realised P&L (average cost, in USD)
-# NOTE: transaction Price is local currency; convert to USD at trade date
+# Convert a local-currency transaction price to USD at trade date
 # ==================================================================
 price_index = prices.index
+def to_usd(sym, price, date):
+    cur = currency_of(sym)
+    s = fx_cache.get(cur)
+    if s is None:
+        return price
+    r = s.reindex(price_index).ffill()
+    try:
+        rate = r.asof(date)
+        return price * (rate if pd.notna(rate) else r.iloc[-1])
+    except Exception:
+        return price
+
+# ==================================================================
+# Reconstruct holdings + realised P&L (average cost, USD)
+# ==================================================================
 shares_ot = pd.DataFrame(0.0, index=price_index, columns=tickers)
 pos = {t: {"shares":0.0, "avg_cost":0.0} for t in tickers}
 realized = 0.0
 
-@st.cache_data(ttl=3600)
-def fx_series(cur, start):
-    if cur == "USD": return None
-    pair = "HKDUSD=X" if cur == "HKD" else "CNYUSD=X"
-    return yf.download(pair, start=start, auto_adjust=True)["Close"].squeeze()
+for _, row in txns.iterrows():
+    t = row["Ticker"]
+    if t not in tickers:
+        continue
+    d, act, sh = row["Date"], row["Action"], float(row["Shares"])
+    pr = to_usd(t, float(row["Price"]), d)
+    sign = 1 if act == "BUY" else -1
+    shares_ot.loc[shares_ot.index >= d, t] += sign * sh
+    p = pos[t]
+    if act == "BUY":
+        tot = p["shares"] + sh
+        if tot > 0:
+            p["avg_cost"] = (p["shares"]*p["avg_cost"] + sh*pr) / tot
+        p["shares"] = tot
+    else:
+        realized += (pr - p["avg_cost"]) * min(sh, p["shares"])
+        p["shares"] = max(p["shares"] - sh, 0.0)
 
-fx_cache = {c: fx_series(c, start_date) for c in ["HKD","CNY"]}
+shares_ot = shares_ot.clip(lower=0)
+port_prices = prices[tickers].ffill()
+port_value = (shares_ot * port_prices).sum(axis=1)
+port_value = port_value[port_value > 0]
+if port_value.empty:
+    st.warning("No active holdings.")
+    st.stop()
+port_ret = port_value.pct_change().dropna()
 
-def to_usd(sd.Series({t: pos[t]["avg_cost"]*pos[t]["shares"] for t in cur_shares.index}).sum()
+cur_shares = pd.Series({t: pos[t]["shares"] for t in tickers})
+cur_shares = cur_shares[cur_shares > 0]
+cur_prices = port_prices.iloc[-1]
+latest_value = cur_shares * cur_prices[cur_shares.index]
+market_value = latest_value.sum()
+cost_basis = pd.Series({t: pos[t]["avg_cost"]*pos[t]["shares"] for t in cur_shares.index}).sum()
 unrealized = market_value - cost_basis
 
 bench_px = prices[benchmark].reindex(port_value.index).ffill()
@@ -238,7 +287,8 @@ with tab1:
         rfig.update_layout(height=320, yaxis_title="Sharpe"); st.plotly_chart(rfig, use_container_width=True)
 
 with tab2:
-    if len(cur_shares)==0: st.info("No current holdings.")
+    if len(cur_shares)==0:
+        st.info("No current holdings.")
     else:
         a,b = st.columns(2)
         with a:
@@ -260,7 +310,8 @@ with tab3:
             colorscale="RdBu",reversescale=True,text=corr.round(2).values,texttemplate="%{text}"))
         hm.update_layout(height=500); st.plotly_chart(hm, use_container_width=True)
         st.metric("Avg Pairwise Correlation", f"{corr.values[np.triu_indices_from(corr.values,k=1)].mean():.2f}")
-    else: st.info("Need ≥2 current holdings.")
+    else:
+        st.info("Need ≥2 current holdings.")
 
 with tab4:
     st.subheader(f"Annual Returns vs {benchmark}")
@@ -274,7 +325,8 @@ with tab4:
 
 with tab5:
     st.subheader("Current Holdings (USD)")
-    if len(cur_shares)==0: st.info("No holdings.")
+    if len(cur_shares)==0:
+        st.info("No holdings.")
     else:
         st.dataframe(pd.DataFrame({
             "Shares": cur_shares,
