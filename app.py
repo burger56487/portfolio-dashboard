@@ -387,8 +387,9 @@ st.caption(f"Prices as of {price_index[-1].date()} | {len(port_ret)} return obse
            f"Returns time-weighted. Note: P&L uses dividend/split-adjusted prices, so it may differ from a broker statement that separates price gains and dividends.")
 
 st.divider()
-tab1,tab2,tab3,tab4,tab5,tab6 = st.tabs(
-    ["📊 Performance","🥧 Allocation","🔗 Risk","📅 Annual","📋 Holdings","🧾 Transactions"])
+tab1,tab2,tab3,tab4,tab5,tab6,tab7 = st.tabs(
+    ["📊 Performance","🥧 Allocation","🔗 Risk","📅 Annual","📋 Holdings","🧾 Transactions","🌍 Exposure"])
+
 
 with tab1:
     st.subheader(f"Growth of 100 — Portfolio (TWR) vs {benchmark}")
@@ -464,3 +465,59 @@ with tab5:
 with tab6:
     st.subheader("Transaction History")
     st.dataframe(txns.sort_values("Date"), use_container_width=True)
+
+with tab7:
+    st.subheader("Exposure & Concentration")
+
+    def market_of(s):
+        if s.endswith(".HK"): return "Hong Kong"
+        if s.endswith(".SS") or s.endswith(".SZ"): return "China A"
+        return "US"
+
+    if len(cur_shares) == 0:
+        st.info("No current holdings.")
+    else:
+        w = latest_value / latest_value.sum()
+        hhi = float((w**2).sum())
+        eff_n = 1/hhi if hhi > 0 else 0
+        cc1, cc2, cc3 = st.columns(3)
+        cc1.metric("Holdings", f"{len(w)}")
+        cc2.metric("Top Holding Weight", f"{w.max()*100:.1f}%")
+        cc3.metric("Effective # (1/HHI)", f"{eff_n:.1f}")
+        st.caption("HHI = sum of squared weights; Effective # = 1/HHI. Lower concentration = more diversified.")
+
+        mkt = (w.groupby([market_of(t) for t in w.index]).sum() * 100)
+        cur = (w.groupby([currency_of(t) for t in w.index]).sum() * 100)
+        e1, e2 = st.columns(2)
+        with e1:
+            st.write("**By Market**")
+            pm = go.Figure(data=[go.Pie(labels=mkt.index, values=mkt.values, hole=0.4)])
+            pm.update_layout(height=340, margin=dict(t=10,b=10)); st.plotly_chart(pm, use_container_width=True)
+        with e2:
+            st.write("**By Currency**")
+            pc = go.Figure(data=[go.Pie(labels=cur.index, values=cur.values, hole=0.4)])
+            pc.update_layout(height=340, margin=dict(t=10,b=10)); st.plotly_chart(pc, use_container_width=True)
+
+    st.subheader(f"Rolling Beta (126d) vs {benchmark}")
+    aligned = pd.DataFrame({"p": port_ret, "b": bench_ret}).dropna()
+    if len(aligned) > 130:
+        rb = (aligned["p"].rolling(126).cov(aligned["b"]) / aligned["b"].rolling(126).var()).dropna()
+        rbfig = go.Figure(); rbfig.add_trace(go.Scatter(x=rb.index, y=rb.values, name="Rolling Beta"))
+        rbfig.add_hline(y=1, line_color="gray", line_dash="dash")
+        rbfig.update_layout(height=300, yaxis_title="Beta", hovermode="x unified")
+        st.plotly_chart(rbfig, use_container_width=True)
+    else:
+        st.info("Need more history for rolling beta.")
+
+    st.subheader("Drawdown Duration")
+    peak = twr_curve.cummax()
+    underwater = (twr_curve < peak).astype(int)
+    runs = (underwater != underwater.shift()).cumsum()
+    dd_lengths = underwater.groupby(runs).sum()
+    longest = int(dd_lengths.max()) if len(dd_lengths) else 0
+    current = int(underwater[::-1].cumprod().sum())
+    dc1, dc2 = st.columns(2)
+    dc1.metric("Longest Drawdown (days)", f"{longest}")
+    dc2.metric("Current Drawdown (days)", f"{current}")
+    st.caption("Trading days spent below the previous peak.")
+
