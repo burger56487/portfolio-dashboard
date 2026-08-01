@@ -7,7 +7,7 @@ from streamlit_searchbox import st_searchbox
 
 st.set_page_config(page_title="Portfolio Tracker", layout="wide")
 st.title("📈 Portfolio Tracker")
-st.caption("Multi-market portfolio tracking with TWR, fees/taxes, multi-account, FX conversion, and risk analytics.")
+st.caption("Multi-market portfolio tracking with TWR, fees/taxes, multi-account, dividends, FX conversion, and risk analytics.")
 
 # ==================================================================
 # LIVE MARKET HEADER
@@ -106,6 +106,17 @@ def price_on_date(ticker, date_str):
     except Exception:
         return None
 
+@st.cache_data(ttl=3600)
+def get_dividends(ticker, start):
+    try:
+        d = yf.Ticker(ticker).dividends
+        if d.empty:
+            return pd.Series(dtype=float)
+        d.index = pd.to_datetime(d.index).tz_localize(None)
+        return d[d.index >= pd.to_datetime(start)]
+    except Exception:
+        return pd.Series(dtype=float)
+
 TXN_COLS = ["Date","Ticker","Action","Shares","Price","Fee","Tax","Account","Note"]
 
 def normalize_txns(df):
@@ -121,11 +132,11 @@ st.sidebar.header("Transactions")
 
 if "txns" not in st.session_state:
     st.session_state.txns = pd.DataFrame({
-        "Date":   ["2023-01-03", "2023-01-03", "2023-06-01"],
+        "Date":   ["2022-01-03", "2022-01-03", "2023-06-01"],
         "Ticker": ["AAPL", "0700.HK", "600519.SS"],
         "Action": ["BUY", "BUY", "BUY"],
         "Shares": [10.0, 100.0, 10.0],
-        "Price":  [125.0, 330.0, 1700.0],
+        "Price":  [180.0, 460.0, 1700.0],
         "Fee":    [1.0, 5.0, 3.0],
         "Tax":    [0.0, 0.0, 0.0],
         "Account":["Default","Default","Default"],
@@ -133,7 +144,6 @@ if "txns" not in st.session_state:
     })
 st.session_state.txns = normalize_txns(st.session_state.txns)
 
-# Import
 st.sidebar.subheader("Import / Export")
 up = st.sidebar.file_uploader("Upload transactions CSV", type="csv")
 if up is not None:
@@ -143,7 +153,6 @@ if up is not None:
     except Exception as e:
         st.sidebar.error(f"Could not read CSV: {e}")
 
-# Add
 st.sidebar.subheader("Add a transaction")
 with st.sidebar:
     picked = st_searchbox(search_stocks, placeholder="Type ticker or name (T, 腾讯, Tencent)…", key="stock_search")
@@ -185,7 +194,6 @@ if st.sidebar.button("➕ Add transaction"):
             st.session_state.txns = pd.concat([st.session_state.txns, new], ignore_index=True)
             st.sidebar.success(f"Added {t_action} {t_shares} {t_ticker}")
 
-# Manage
 st.sidebar.subheader("Manage transactions")
 df_side = st.session_state.txns.reset_index(drop=True)
 if not df_side.empty:
@@ -212,7 +220,6 @@ txns = st.session_state.txns.copy()
 st.sidebar.download_button("💾 Download transactions CSV",
     txns.to_csv(index=False).encode(), "transactions.csv", "text/csv")
 
-# Settings
 st.sidebar.subheader("Settings")
 benchmark = st.sidebar.selectbox("Benchmark", ["SPY", "QQQ", "^HSI", "000300.SS"], index=0)
 rf_rate = st.sidebar.number_input("Risk-free rate (%/yr)", 0.0, value=4.0, step=0.5) / 100
@@ -268,7 +275,6 @@ if _fx_msg:
 else:
     st.sidebar.warning("💱 FX unavailable")
 
-
 @st.cache_data(ttl=1800)
 def load_prices(tickers, bench, start, _fx):
     syms = tickers + [bench]
@@ -322,7 +328,7 @@ for _, row in txns.iterrows():
         tot = p["shares"] + sh
         if tot > 0: p["avg_cost"] = (p["shares"]*p["avg_cost"] + cost) / tot
         p["shares"] = tot
-    else:  # SELL
+    else:
         if sh > p["shares"] + 1e-9:
             oversell.append(f"{d.date()} SELL {sh:g} {t} > held {p['shares']:g}")
         sell = min(sh, p["shares"])
@@ -338,7 +344,21 @@ shares_ot = shares_ot.clip(lower=0)
 port_prices = prices[tickers].ffill()
 port_value = (shares_ot * port_prices).sum(axis=1)
 
-# TWR
+# ---- Dividend income (auto-fetched) ----
+div_income = {}
+for t in tickers:
+    divs = get_dividends(t, start_date)
+    tot = 0.0
+    for dt, dps in divs.items():
+        try: sh_held = shares_ot[t].asof(dt)
+        except Exception: sh_held = 0.0
+        if pd.notna(sh_held) and sh_held > 0:
+            tot += to_usd(t, float(dps) * float(sh_held), dt)
+    if tot > 0:
+        div_income[t] = tot
+total_div = sum(div_income.values())
+
+# ---- TWR ----
 prev_shares = shares_ot.shift(1).fillna(0.0)
 val_prev = (prev_shares * port_prices.shift(1)).sum(axis=1)
 val_hold = (prev_shares * port_prices).sum(axis=1)
@@ -361,7 +381,7 @@ bench_curve = bench_px / bench_px.iloc[0] * 100
 bench_total = bench_curve.iloc[-1]/100 - 1
 bench_ret = bench_px.pct_change().dropna()
 
-# Risk metrics
+# ---- Risk metrics ----
 ann_vol = port_ret.std()*np.sqrt(252)
 excess_ann = port_ret.mean()*252 - rf_rate
 port_sharpe = excess_ann/ann_vol if ann_vol > 0 else 0.0
@@ -394,18 +414,19 @@ r3.metric("Volatility", f"{ann_vol*100:.1f}%")
 r4.metric("Max Drawdown", f"{port_mdd*100:.1f}%")
 r5.metric("Beta", f"{beta:.2f}")
 
-r6,r7,r8 = st.columns(3)
+r6,r7,r8,r9 = st.columns(4)
 r6.metric("Daily VaR 95% (loss)", f"{var95:.2f}%")
 r7.metric("Daily CVaR 95% (loss)", f"{cvar95:.2f}%")
 r8.metric("Total Fees & Taxes", f"${total_fees:,.0f}")
+r9.metric("Dividend Income", f"${total_div:,.0f}")
 
 st.caption(f"Prices as of {price_index[-1].date()} | {len(port_ret)} obs | "
-           f"Cost basis includes fees/taxes. Returns time-weighted. "
-           f"P&L uses dividend/split-adjusted prices (dividends/splits as explicit transactions coming next).")
+           f"Cost basis includes fees/taxes. Returns time-weighted (dividends & splits reflected). "
+           f"Dividend income shown for transparency.")
 
 st.divider()
-tab1,tab2,tab3,tab4,tab5,tab6,tab7 = st.tabs(
-    ["📊 Performance","🥧 Allocation","🔗 Risk","📅 Annual","📋 Holdings","🧾 Transactions","🌍 Exposure"])
+tab1,tab2,tab3,tab4,tab5,tab6,tab7,tab8 = st.tabs(
+    ["📊 Performance","🥧 Allocation","🔗 Risk","📅 Annual","📋 Holdings","🧾 Transactions","🌍 Exposure","💵 Dividends"])
 
 with tab1:
     st.subheader(f"Growth of 100 — Portfolio (TWR) vs {benchmark}")
@@ -473,7 +494,7 @@ with tab5:
             "Unrealised P&L": pd.Series({t:(cur_prices[t]-pos[t]["avg_cost"])*pos[t]["shares"] for t in cur_shares.index}).round(2),
             "Weight %": (latest_value/latest_value.sum()*100).round(1),
         }), use_container_width=True)
-    st.caption(f"Realised P&L: ${realized:,.2f} | Total fees & taxes: ${total_fees:,.2f}")
+    st.caption(f"Realised P&L: ${realized:,.2f} | Fees & taxes: ${total_fees:,.2f} | Dividends: ${total_div:,.2f}")
 
 with tab6:
     st.subheader("Transaction History")
@@ -520,3 +541,17 @@ with tab7:
     dc1, dc2 = st.columns(2)
     dc1.metric("Longest Drawdown (days)", f"{longest}")
     dc2.metric("Current Drawdown (days)", f"{current}")
+
+with tab8:
+    st.subheader("Dividend Income (auto-fetched)")
+    if div_income:
+        ds = pd.Series(div_income).sort_values(ascending=False)
+        st.metric("Total Dividend Income (USD)", f"${total_div:,.2f}")
+        bar = go.Figure(data=[go.Bar(x=ds.index, y=ds.values, marker_color="#5cb85c")])
+        bar.update_layout(height=380, yaxis_title="Dividend Income ($)")
+        st.plotly_chart(bar, use_container_width=True)
+        st.dataframe(ds.round(2).to_frame("Dividend Income (USD)"), use_container_width=True)
+        st.caption("Estimated from shares held on each ex-dividend date, converted to USD. "
+                   "Already reflected in total-return (TWR) performance; shown here for transparency.")
+    else:
+        st.info("No dividends found for current holdings over the period.")
