@@ -5,3 +5,5 @@ numpy
 plotly
 streamlit-searchbox
 streamlit-autorefresh
+gspread
+google-auth
