@@ -7,7 +7,49 @@ from streamlit_searchbox import st_searchbox
 
 st.set_page_config(page_title="Portfolio Tracker", layout="wide")
 st.title("📈 Portfolio Tracker")
-st.caption("Multi-market (US / HK / A-share) portfolio tracking with P&L, dividends, FX conversion, and risk analytics.")
+st.caption("Multi-market (US / HK / A-share) portfolio tracking with live market data, P&L, dividends, FX conversion, and risk analytics.")
+
+# ==================================================================
+# LIVE MARKET HEADER
+# ==================================================================
+@st.cache_data(ttl=60)
+def index_snapshot(symbol):
+    d = yf.Ticker(symbol).history(period="5d")
+    if d.empty or len(d) < 2:
+        return None
+    last = float(d["Close"].iloc[-1]); prev = float(d["Close"].iloc[-2])
+    return last, (last / prev - 1) * 100
+
+@st.cache_data(ttl=60)
+def intraday(symbol):
+    d = yf.Ticker(symbol).history(period="1d", interval="1m")
+    if d.empty:
+        d = yf.Ticker(symbol).history(period="5d", interval="15m")
+    return d
+
+INDICES = {"S&P 500": "^GSPC", "Nasdaq": "^IXIC", "Hang Seng": "^HSI", "CSI 300": "000300.SS"}
+
+st.subheader("🌐 Live Market")
+mcols = st.columns(len(INDICES))
+for (nm, sym), col in zip(INDICES.items(), mcols):
+    snap = index_snapshot(sym)
+    if snap:
+        last, pct = snap
+        col.metric(nm, f"{last:,.0f}", f"{pct:+.2f}%")
+    else:
+        col.metric(nm, "—")
+
+idx_choice = st.selectbox("Intraday chart", list(INDICES.keys()), index=0)
+intra = intraday(INDICES[idx_choice])
+if not intra.empty:
+    ifig = go.Figure()
+    ifig.add_trace(go.Scatter(x=intra.index, y=intra["Close"], name=idx_choice,
+                              line=dict(color="#2E86DE")))
+    ifig.update_layout(height=280, yaxis_title="Level", hovermode="x unified",
+                       margin=dict(t=10, b=10))
+    st.plotly_chart(ifig, use_container_width=True)
+st.caption("Data via Yahoo Finance (~15-min delayed). Markets closed on weekends — intraday shows the last session.")
+st.divider()
 
 # ==================================================================
 # Stock database (from stocks.csv, with fallback)
@@ -32,7 +74,7 @@ def currency_of(sym):
     return "USD"
 
 def search_stocks(query):
-    """Called on each keystroke; returns (label, symbol) sorted prefix-first."""
+    """Prefix-first search on each keystroke."""
     if not query:
         return []
     qu = query.strip().upper()
@@ -52,6 +94,18 @@ def search_stocks(query):
     results.sort(key=lambda x: (x[0], x[1]))
     return [(lbl, sym) for _, lbl, sym in results]
 
+@st.cache_data(ttl=600)
+def price_on_date(ticker, date_str):
+    """Local-currency close on/near a given date."""
+    try:
+        d0 = pd.to_datetime(date_str)
+        h = yf.Ticker(ticker).history(start=d0 - pd.Timedelta(days=7), end=d0 + pd.Timedelta(days=1))
+        if h.empty:
+            h = yf.Ticker(ticker).history(period="5d")
+        return float(h["Close"].iloc[-1]) if not h.empty else None
+    except Exception:
+        return None
+
 # ==================================================================
 # Sidebar: transactions
 # ==================================================================
@@ -66,7 +120,7 @@ if "txns" not in st.session_state:
         "Price":  [125.0, 330.0, 1700.0],
     })
 
-# Import / Export
+# Import
 st.sidebar.subheader("Import / Export")
 up = st.sidebar.file_uploader("Upload transactions CSV", type="csv")
 if up is not None:
@@ -76,7 +130,7 @@ if up is not None:
     except Exception as e:
         st.sidebar.error(f"Could not read CSV: {e}")
 
-# Add a transaction (prefix autocomplete)
+# Add a transaction (prefix autocomplete + auto price)
 st.sidebar.subheader("Add a transaction")
 with st.sidebar:
     picked = st_searchbox(
@@ -90,7 +144,13 @@ t_ticker = manual if manual else (picked or "")
 t_date = st.sidebar.date_input("Date", pd.to_datetime("2024-01-02"))
 t_action = st.sidebar.selectbox("Action", ["BUY", "SELL"])
 t_shares = st.sidebar.number_input("Shares", min_value=0.0, value=1.0, step=1.0)
-t_price = st.sidebar.number_input("Price (local currency)", min_value=0.0, value=100.0, step=1.0)
+
+auto_price = price_on_date(t_ticker, str(t_date)) if t_ticker else None
+_default = float(auto_price) if auto_price else 100.0
+t_price = st.sidebar.number_input("Price (local currency)", min_value=0.0,
+    value=_default, step=1.0, key=f"price_{t_ticker}_{t_date}")
+if auto_price:
+    st.sidebar.caption(f"📈 Auto-filled: close on/near {t_date} = {auto_price:.2f} (editable)")
 
 if st.sidebar.button("➕ Add transaction"):
     if not t_ticker:
@@ -111,9 +171,8 @@ if st.sidebar.button("➕ Add transaction"):
             st.session_state.txns = pd.concat([st.session_state.txns, new], ignore_index=True)
             st.sidebar.success(f"Added {t_action} {t_shares} {t_ticker}")
 
-# --- Manage transactions (safe delete, no accidental corruption) ---
+# Manage transactions (safe delete)
 st.sidebar.subheader("Manage transactions")
-
 df = st.session_state.txns.reset_index(drop=True)
 if not df.empty:
     options = [
@@ -132,7 +191,6 @@ if st.sidebar.button("⚠️ Clear all"):
     st.session_state.txns = st.session_state.txns.iloc[0:0]
     st.rerun()
 
-# Advanced: raw editable table (hidden by default to prevent accidental edits)
 with st.sidebar.expander("Advanced: edit raw table"):
     st.session_state.txns = st.data_editor(
         st.session_state.txns, num_rows="dynamic",
@@ -142,7 +200,6 @@ txns = st.session_state.txns.copy()
 
 st.sidebar.download_button("💾 Download transactions CSV",
     txns.to_csv(index=False).encode(), "transactions.csv", "text/csv")
-
 
 st.sidebar.subheader("Settings")
 benchmark = st.sidebar.selectbox("Benchmark", ["SPY", "QQQ", "^HSI", "000300.SS"], index=0)
@@ -163,7 +220,7 @@ tickers = sorted(txns["Ticker"].unique().tolist())
 start_date = txns["Date"].min()
 
 # ==================================================================
-# FX (downloaded once, reused everywhere)
+# FX (once)
 # ==================================================================
 @st.cache_data(ttl=3600)
 def get_fx(start):
@@ -181,7 +238,7 @@ def get_fx(start):
 fx_cache = get_fx(start_date)
 
 # ==================================================================
-# Prices (converted to USD using fx_cache)
+# Prices (USD-converted)
 # ==================================================================
 @st.cache_data(ttl=3600)
 def load_prices(tickers, bench, start, _fx):
@@ -211,7 +268,7 @@ if not tickers:
     st.stop()
 
 # ==================================================================
-# Convert local-currency transaction price to USD at trade date
+# Local price -> USD at trade date
 # ==================================================================
 price_index = prices.index
 def to_usd(sym, price, date):
@@ -227,7 +284,7 @@ def to_usd(sym, price, date):
         return price
 
 # ==================================================================
-# Reconstruct holdings + realised P&L (average cost, USD)
+# Holdings + realised P&L (average cost, USD)
 # ==================================================================
 shares_ot = pd.DataFrame(0.0, index=price_index, columns=tickers)
 pos = {t: {"shares":0.0, "avg_cost":0.0} for t in tickers}
@@ -272,7 +329,6 @@ bench_px = prices[benchmark].reindex(port_value.index).ffill()
 bench_total = bench_px.iloc[-1]/bench_px.iloc[0] - 1
 port_total = port_value.iloc[-1]/port_value.iloc[0] - 1
 bench_ret = bench_px.pct_change().dropna()
-today_move = port_ret.iloc[-1] if len(port_ret) else 0.0
 
 # ==================================================================
 # Risk metrics
@@ -294,8 +350,9 @@ beta = (np.cov(port_ret.loc[common], bench_ret.loc[common])[0,1]/np.var(bench_re
         if len(common)>2 and np.var(bench_ret.loc[common])>0 else float("nan"))
 
 # ==================================================================
-# Layout
+# Portfolio summary
 # ==================================================================
+st.subheader("💼 My Portfolio")
 c1,c2,c3,c4 = st.columns(4)
 c1.metric("Market Value (USD)", f"${market_value:,.0f}")
 c2.metric("Unrealised P&L", f"${unrealized:,.0f}", f"{(unrealized/cost_basis*100) if cost_basis>0 else 0:+.1f}%")
