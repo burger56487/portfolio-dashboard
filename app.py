@@ -5,9 +5,16 @@ import numpy as np
 import plotly.graph_objects as go
 from streamlit_searchbox import st_searchbox
 
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    GSHEETS_LIB = True
+except Exception:
+    GSHEETS_LIB = False
+
 st.set_page_config(page_title="Portfolio Tracker", layout="wide")
 st.title("📈 Portfolio Tracker")
-st.caption("Multi-market portfolio tracking with TWR, fees/taxes, multi-account, dividends, FX conversion, and risk analytics.")
+st.caption("Multi-market portfolio tracking with TWR, fees/taxes, multi-account, dividends, cloud sync, and risk analytics.")
 
 # ==================================================================
 # LIVE MARKET HEADER
@@ -53,7 +60,7 @@ st.caption("Data via Yahoo Finance (~15-min delayed). Weekends show the last ses
 st.divider()
 
 # ==================================================================
-# Stock database
+# Helpers
 # ==================================================================
 @st.cache_data
 def load_stock_db():
@@ -125,25 +132,73 @@ def normalize_txns(df):
             df[c] = default
     return df[TXN_COLS]
 
+DEFAULT_TXNS = pd.DataFrame({
+    "Date":["2022-01-03","2022-01-03","2023-06-01"], "Ticker":["AAPL","0700.HK","600519.SS"],
+    "Action":["BUY","BUY","BUY"], "Shares":[10.0,100.0,10.0], "Price":[180.0,460.0,1700.0],
+    "Fee":[1.0,5.0,3.0], "Tax":[0.0,0.0,0.0], "Account":["Default","Default","Default"], "Note":["","",""],
+})
+
+# ==================================================================
+# Google Sheets cloud sync (graceful fallback)
+# ==================================================================
+@st.cache_resource
+def get_gsheet():
+    if not GSHEETS_LIB:
+        return None
+    try:
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_info(dict(st.secrets["gcp_service_account"]), scopes=scopes)
+        client = gspread.authorize(creds)
+        return client.open_by_key(st.secrets["gsheet_id"]).sheet1
+    except Exception:
+        return None
+
+def load_txns_cloud():
+    sh = get_gsheet()
+    if sh is None: return None
+    try:
+        rec = sh.get_all_records()
+        return normalize_txns(pd.DataFrame(rec)) if rec else None
+    except Exception:
+        return None
+
+def save_txns_cloud(df):
+    sh = get_gsheet()
+    if sh is None: return False
+    try:
+        sh.clear()
+        sh.update([df.columns.tolist()] + df.astype(str).values.tolist())
+        return True
+    except Exception:
+        return False
+
 # ==================================================================
 # Sidebar: transactions
 # ==================================================================
 st.sidebar.header("Transactions")
 
 if "txns" not in st.session_state:
-    st.session_state.txns = pd.DataFrame({
-        "Date":   ["2022-01-03", "2022-01-03", "2023-06-01"],
-        "Ticker": ["AAPL", "0700.HK", "600519.SS"],
-        "Action": ["BUY", "BUY", "BUY"],
-        "Shares": [10.0, 100.0, 10.0],
-        "Price":  [180.0, 460.0, 1700.0],
-        "Fee":    [1.0, 5.0, 3.0],
-        "Tax":    [0.0, 0.0, 0.0],
-        "Account":["Default","Default","Default"],
-        "Note":   ["","",""],
-    })
+    cloud = load_txns_cloud()
+    st.session_state.txns = cloud if cloud is not None else DEFAULT_TXNS.copy()
 st.session_state.txns = normalize_txns(st.session_state.txns)
 
+# Cloud sync
+st.sidebar.subheader("☁️ Cloud Sync")
+if get_gsheet() is not None:
+    st.sidebar.success("Connected to Google Sheets")
+    cA, cB = st.sidebar.columns(2)
+    if cA.button("💾 Save"):
+        st.sidebar.success("Saved!") if save_txns_cloud(st.session_state.txns) else st.sidebar.error("Save failed.")
+    if cB.button("🔄 Load"):
+        c = load_txns_cloud()
+        if c is not None:
+            st.session_state.txns = c; st.rerun()
+        else:
+            st.sidebar.warning("Nothing to load.")
+else:
+    st.sidebar.info("Cloud not configured — session-only. Add Google Sheets secrets to enable.")
+
+# Import
 st.sidebar.subheader("Import / Export")
 up = st.sidebar.file_uploader("Upload transactions CSV", type="csv")
 if up is not None:
@@ -153,6 +208,7 @@ if up is not None:
     except Exception as e:
         st.sidebar.error(f"Could not read CSV: {e}")
 
+# Add
 st.sidebar.subheader("Add a transaction")
 with st.sidebar:
     picked = st_searchbox(search_stocks, placeholder="Type ticker or name (T, 腾讯, Tencent)…", key="stock_search")
@@ -194,6 +250,7 @@ if st.sidebar.button("➕ Add transaction"):
             st.session_state.txns = pd.concat([st.session_state.txns, new], ignore_index=True)
             st.sidebar.success(f"Added {t_action} {t_shares} {t_ticker}")
 
+# Manage
 st.sidebar.subheader("Manage transactions")
 df_side = st.session_state.txns.reset_index(drop=True)
 if not df_side.empty:
@@ -220,6 +277,7 @@ txns = st.session_state.txns.copy()
 st.sidebar.download_button("💾 Download transactions CSV",
     txns.to_csv(index=False).encode(), "transactions.csv", "text/csv")
 
+# Settings
 st.sidebar.subheader("Settings")
 benchmark = st.sidebar.selectbox("Benchmark", ["SPY", "QQQ", "^HSI", "000300.SS"], index=0)
 rf_rate = st.sidebar.number_input("Risk-free rate (%/yr)", 0.0, value=4.0, step=0.5) / 100
@@ -308,7 +366,7 @@ def to_usd(sym, amount, date):
         return amount
 
 # ==================================================================
-# Holdings, realised P&L (avg cost incl. fees/taxes), oversell warn
+# Holdings, realised P&L, oversell
 # ==================================================================
 shares_ot = pd.DataFrame(0.0, index=price_index, columns=tickers)
 pos = {t: {"shares":0.0, "avg_cost":0.0} for t in tickers}
@@ -333,8 +391,7 @@ for _, row in txns.iterrows():
             oversell.append(f"{d.date()} SELL {sh:g} {t} > held {p['shares']:g}")
         sell = min(sh, p["shares"])
         shares_ot.loc[shares_ot.index >= d, t] -= sell
-        proceeds = sell*pr - fee
-        realized += proceeds - sell*p["avg_cost"]
+        realized += (sell*pr - fee) - sell*p["avg_cost"]
         p["shares"] = max(p["shares"] - sell, 0.0)
 
 if oversell:
@@ -344,7 +401,7 @@ shares_ot = shares_ot.clip(lower=0)
 port_prices = prices[tickers].ffill()
 port_value = (shares_ot * port_prices).sum(axis=1)
 
-# ---- Dividend income (auto-fetched) ----
+# Dividends
 div_income = {}
 for t in tickers:
     divs = get_dividends(t, start_date)
@@ -354,11 +411,10 @@ for t in tickers:
         except Exception: sh_held = 0.0
         if pd.notna(sh_held) and sh_held > 0:
             tot += to_usd(t, float(dps) * float(sh_held), dt)
-    if tot > 0:
-        div_income[t] = tot
+    if tot > 0: div_income[t] = tot
 total_div = sum(div_income.values())
 
-# ---- TWR ----
+# TWR
 prev_shares = shares_ot.shift(1).fillna(0.0)
 val_prev = (prev_shares * port_prices.shift(1)).sum(axis=1)
 val_hold = (prev_shares * port_prices).sum(axis=1)
@@ -381,7 +437,7 @@ bench_curve = bench_px / bench_px.iloc[0] * 100
 bench_total = bench_curve.iloc[-1]/100 - 1
 bench_ret = bench_px.pct_change().dropna()
 
-# ---- Risk metrics ----
+# Risk
 ann_vol = port_ret.std()*np.sqrt(252)
 excess_ann = port_ret.mean()*252 - rf_rate
 port_sharpe = excess_ann/ann_vol if ann_vol > 0 else 0.0
@@ -421,8 +477,7 @@ r8.metric("Total Fees & Taxes", f"${total_fees:,.0f}")
 r9.metric("Dividend Income", f"${total_div:,.0f}")
 
 st.caption(f"Prices as of {price_index[-1].date()} | {len(port_ret)} obs | "
-           f"Cost basis includes fees/taxes. Returns time-weighted (dividends & splits reflected). "
-           f"Dividend income shown for transparency.")
+           f"Cost basis includes fees/taxes. Returns time-weighted (dividends & splits reflected).")
 
 st.divider()
 tab1,tab2,tab3,tab4,tab5,tab6,tab7,tab8 = st.tabs(
@@ -511,7 +566,6 @@ with tab7:
         cc1.metric("Holdings", f"{len(w)}")
         cc2.metric("Top Holding Weight", f"{w.max()*100:.1f}%")
         cc3.metric("Effective # (1/HHI)", f"{eff_n:.1f}")
-        st.caption("Effective # = 1/HHI. Lower concentration = more diversified.")
         mkt = (w.groupby([market_of(t) for t in w.index]).sum()*100)
         cur = (w.groupby([currency_of(t) for t in w.index]).sum()*100)
         e1, e2 = st.columns(2)
@@ -551,7 +605,6 @@ with tab8:
         bar.update_layout(height=380, yaxis_title="Dividend Income ($)")
         st.plotly_chart(bar, use_container_width=True)
         st.dataframe(ds.round(2).to_frame("Dividend Income (USD)"), use_container_width=True)
-        st.caption("Estimated from shares held on each ex-dividend date, converted to USD. "
-                   "Already reflected in total-return (TWR) performance; shown here for transparency.")
+        st.caption("Estimated from shares held on each ex-dividend date, converted to USD.")
     else:
         st.info("No dividends found for current holdings over the period.")
