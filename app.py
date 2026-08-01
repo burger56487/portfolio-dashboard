@@ -111,13 +111,38 @@ if st.sidebar.button("➕ Add transaction"):
             st.session_state.txns = pd.concat([st.session_state.txns, new], ignore_index=True)
             st.sidebar.success(f"Added {t_action} {t_shares} {t_ticker}")
 
-st.sidebar.write("Edit transactions:")
-st.session_state.txns = st.sidebar.data_editor(
-    st.session_state.txns, num_rows="dynamic", use_container_width=True)
+# --- Manage transactions (safe delete, no accidental corruption) ---
+st.sidebar.subheader("Manage transactions")
+
+df = st.session_state.txns.reset_index(drop=True)
+if not df.empty:
+    options = [
+        f"{i}: {r.get('Date','')}  {r.get('Action','')}  {r.get('Shares','')} {r.get('Ticker','')} @ {r.get('Price','')}"
+        for i, r in df.iterrows()
+    ]
+    to_delete = st.sidebar.multiselect("Select transactions to delete", options)
+    if st.sidebar.button("🗑️ Delete selected") and to_delete:
+        idx = [int(o.split(":")[0]) for o in to_delete]
+        st.session_state.txns = df.drop(index=idx).reset_index(drop=True)
+        st.rerun()
+else:
+    st.sidebar.caption("No transactions yet — add one above.")
+
+if st.sidebar.button("⚠️ Clear all"):
+    st.session_state.txns = st.session_state.txns.iloc[0:0]
+    st.rerun()
+
+# Advanced: raw editable table (hidden by default to prevent accidental edits)
+with st.sidebar.expander("Advanced: edit raw table"):
+    st.session_state.txns = st.data_editor(
+        st.session_state.txns, num_rows="dynamic",
+        use_container_width=True, key="raw_editor")
+
 txns = st.session_state.txns.copy()
 
 st.sidebar.download_button("💾 Download transactions CSV",
     txns.to_csv(index=False).encode(), "transactions.csv", "text/csv")
+
 
 st.sidebar.subheader("Settings")
 benchmark = st.sidebar.selectbox("Benchmark", ["SPY", "QQQ", "^HSI", "000300.SS"], index=0)
