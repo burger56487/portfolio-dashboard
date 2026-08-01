@@ -1,0 +1,49 @@
+Symbol,Name_EN,Name_CN,Market
+AAPL,Apple,苹果,US
+MSFT,Microsoft,微软,US
+NVDA,Nvidia,英伟达,US
+AMZN,Amazon,亚马逊,US
+GOOGL,Alphabet,谷歌,US
+META,Meta,脸书,US
+TSLA,Tesla,特斯拉,US
+NFLX,Netflix,奈飞,US
+JPM,JPMorgan,摩根大通,US
+V,Visa,维萨,US
+MA,Mastercard,万事达,US
+WMT,Walmart,沃尔玛,US
+COST,Costco,好市多,US
+KO,Coca-Cola,可口可乐,US
+PEP,PepsiCo,百事,US
+DIS,Disney,迪士尼,US
+NKE,Nike,耐克,US
+INTC,Intel,英特尔,US
+AMD,AMD,超微,US
+ADBE,Adobe,奥多比,US
+CRM,Salesforce,赛富时,US
+0700.HK,Tencent,腾讯,HK
+9988.HK,Alibaba,阿里巴巴,HK
+3690.HK,Meituan,美团,HK
+1810.HK,Xiaomi,小米,HK
+9618.HK,JD.com,京东,HK
+2318.HK,Ping An,中国平安,HK
+0941.HK,China Mobile,中国移动,HK
+1299.HK,AIA,友邦保险,HK
+0388.HK,HKEX,香港交易所,HK
+0005.HK,HSBC,汇丰控股,HK
+1024.HK,Kuaishou,快手,HK
+2020.HK,Anta,安踏体育,HK
+9999.HK,NetEase,网易,HK
+600519.SS,Kweichow Moutai,贵州茅台,CN
+601398.SS,ICBC,工商银行,CN
+600036.SS,China Merchants Bank,招商银行,CN
+601318.SS,Ping An,中国平安,CN
+600900.SS,Yangtze Power,长江电力,CN
+601988.SS,Bank of China,中国银行,CN
+600028.SS,Sinopec,中国石化,CN
+000001.SZ,Ping An Bank,平安银行,CN
+000858.SZ,Wuliangye,五粮液,CN
+300750.SZ,CATL,宁德时代,CN
+002594.SZ,BYD,比亚迪,CN
+000333.SZ,Midea,美的集团,CN
+002415.SZ,Hikvision,海康威视,CN
+300059.SZ,East Money,东方财富,CN
